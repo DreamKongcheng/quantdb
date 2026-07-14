@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import date
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import duckdb
@@ -90,6 +92,198 @@ class DuckDBStore:
             )
             """
         )
+        self._initialize_market_schema()
+        self._initialize_market_metrics_schema()
+
+    def _initialize_market_schema(self) -> None:
+        self.connection.execute("CREATE SCHEMA IF NOT EXISTS market")
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.daily_bar AS
+            SELECT
+                daily.ts_code,
+                daily.trade_date,
+                daily.open,
+                daily.high,
+                daily.low,
+                daily.close,
+                daily.pre_close,
+                daily.change,
+                daily.pct_chg,
+                daily.vol,
+                daily.amount,
+                factor.adj_factor
+            FROM tushare.daily AS daily
+            LEFT JOIN tushare.adj_factor AS factor
+                USING (ts_code, trade_date)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.latest_adj_factor AS
+            SELECT
+                ts_code,
+                max(trade_date) AS trade_date,
+                arg_max(adj_factor, trade_date) AS adj_factor
+            FROM tushare.adj_factor
+            WHERE adj_factor IS NOT NULL
+            GROUP BY ts_code
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.daily_bar_hfq AS
+            SELECT
+                ts_code,
+                trade_date,
+                open * adj_factor AS open,
+                high * adj_factor AS high,
+                low * adj_factor AS low,
+                close * adj_factor AS close,
+                pre_close * adj_factor AS pre_close,
+                change * adj_factor AS change,
+                pct_chg,
+                vol,
+                amount,
+                adj_factor
+            FROM market.daily_bar
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.daily_bar_qfq_latest AS
+            SELECT
+                bar.ts_code,
+                bar.trade_date,
+                bar.open * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS open,
+                bar.high * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS high,
+                bar.low * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS low,
+                bar.close * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS close,
+                bar.pre_close * bar.adj_factor
+                    / NULLIF(anchor.adj_factor, 0) AS pre_close,
+                bar.change * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS change,
+                bar.pct_chg,
+                bar.vol,
+                bar.amount,
+                bar.adj_factor,
+                anchor.adj_factor AS anchor_adj_factor
+            FROM market.daily_bar AS bar
+            LEFT JOIN market.latest_adj_factor AS anchor USING (ts_code)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO market.daily_bar_qfq_asof(as_of_date) AS TABLE (
+                WITH anchor AS (
+                    SELECT ts_code, arg_max(adj_factor, trade_date) AS adj_factor
+                    FROM tushare.adj_factor
+                    WHERE trade_date <= as_of_date
+                      AND adj_factor IS NOT NULL
+                    GROUP BY ts_code
+                )
+                SELECT
+                    bar.ts_code,
+                    bar.trade_date,
+                    bar.open * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS open,
+                    bar.high * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS high,
+                    bar.low * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS low,
+                    bar.close * bar.adj_factor / NULLIF(anchor.adj_factor, 0) AS close,
+                    bar.pre_close * bar.adj_factor
+                        / NULLIF(anchor.adj_factor, 0) AS pre_close,
+                    bar.change * bar.adj_factor
+                        / NULLIF(anchor.adj_factor, 0) AS change,
+                    bar.pct_chg,
+                    bar.vol,
+                    bar.amount,
+                    bar.adj_factor,
+                    anchor.adj_factor AS anchor_adj_factor
+                FROM market.daily_bar AS bar
+                LEFT JOIN anchor USING (ts_code)
+                WHERE bar.trade_date <= as_of_date
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 3, '增加 market 行情与复权视图', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 3
+            )
+            """
+        )
+
+    def _initialize_market_metrics_schema(self) -> None:
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.daily_metrics AS
+            SELECT
+                ts_code,
+                trade_date,
+                close,
+                turnover_rate,
+                turnover_rate_f,
+                volume_ratio,
+                pe,
+                pe_ttm,
+                pb,
+                ps,
+                ps_ttm,
+                dv_ratio,
+                dv_ttm,
+                total_share,
+                float_share,
+                free_share,
+                total_mv,
+                circ_mv
+            FROM tushare.daily_basic
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.daily_panel AS
+            SELECT
+                bar.ts_code,
+                bar.trade_date,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.pre_close,
+                bar.change,
+                bar.pct_chg,
+                bar.vol,
+                bar.amount,
+                bar.adj_factor,
+                metrics.turnover_rate,
+                metrics.turnover_rate_f,
+                metrics.volume_ratio,
+                metrics.pe,
+                metrics.pe_ttm,
+                metrics.pb,
+                metrics.ps,
+                metrics.ps_ttm,
+                metrics.dv_ratio,
+                metrics.dv_ttm,
+                metrics.total_share,
+                metrics.float_share,
+                metrics.free_share,
+                metrics.total_mv,
+                metrics.circ_mv
+            FROM market.daily_bar AS bar
+            LEFT JOIN market.daily_metrics AS metrics
+                USING (ts_code, trade_date)
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 4, '增加每日指标与标准行情面板', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 4
+            )
+            """
+        )
 
     def partition_exists(self, dataset_id: str, partition_id: str) -> bool:
         row = self.connection.execute(
@@ -102,6 +296,17 @@ class DuckDBStore:
             [dataset_id, partition_id],
         ).fetchone()
         return bool(row and row[0])
+
+    def partition_ids(self, dataset_id: str) -> set[str]:
+        rows = self.connection.execute(
+            """
+            SELECT partition_id
+            FROM meta.partitions
+            WHERE dataset_id = ?
+            """,
+            [dataset_id],
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def start_run(self, spec: DatasetSpec, partition: Partition) -> UUID:
         run_id = uuid4()
@@ -264,6 +469,233 @@ class DuckDBStore:
 
     def sql(self, query: str) -> duckdb.DuckDBPyRelation:
         return self.connection.sql(query)
+
+    def bars(
+        self,
+        *,
+        symbols: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+        adjust: Literal["none", "qfq", "hfq"],
+        as_of: date | None,
+    ) -> duckdb.DuckDBPyRelation:
+        params: list[object] = []
+        if adjust == "qfq" and as_of is not None:
+            source = "market.daily_bar_qfq_asof(?::DATE)"
+            params.append(as_of)
+        else:
+            source = {
+                "none": "market.daily_bar",
+                "qfq": "market.daily_bar_qfq_latest",
+                "hfq": "market.daily_bar_hfq",
+            }[adjust]
+
+        filters: list[str] = []
+        if symbols is not None:
+            if symbols:
+                placeholders = ", ".join("?" for _ in symbols)
+                filters.append(f"ts_code IN ({placeholders})")
+                params.extend(symbols)
+            else:
+                filters.append("false")
+        if start is not None:
+            filters.append("trade_date >= ?::DATE")
+            params.append(start)
+        if end is not None:
+            filters.append("trade_date <= ?::DATE")
+            params.append(end)
+
+        query = f"SELECT * FROM {source}"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY trade_date, ts_code"
+        return self.connection.sql(query, params=params)
+
+    def health(self, start: date, end: date) -> duckdb.DuckDBPyRelation:
+        return self.connection.sql(
+            """
+            WITH bounds AS (
+                SELECT ?::DATE AS start_date, ?::DATE AS end_date
+            ),
+            ranged_calendar AS (
+                SELECT calendar.*
+                FROM tushare.trade_cal AS calendar, bounds
+                WHERE calendar.exchange = 'SSE'
+                  AND calendar.cal_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            open_dates AS (
+                SELECT cal_date
+                FROM ranged_calendar
+                WHERE is_open = 1
+            ),
+            ranged_daily AS (
+                SELECT daily.*
+                FROM tushare.daily AS daily, bounds
+                WHERE daily.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            ranged_factor AS (
+                SELECT factor.*
+                FROM tushare.adj_factor AS factor, bounds
+                WHERE factor.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            ranged_metrics AS (
+                SELECT metrics.*
+                FROM tushare.daily_basic AS metrics, bounds
+                WHERE metrics.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            calendar_health AS (
+                SELECT
+                    date_diff('day', start_date, end_date) + 1 AS expected_days,
+                    (SELECT count(DISTINCT cal_date) FROM ranged_calendar) AS available_days
+                FROM bounds
+            ),
+            coverage AS (
+                SELECT
+                    'tushare.stock_basic' AS dataset_id,
+                    NULL::BIGINT AS expected_days,
+                    NULL::BIGINT AS available_days,
+                    count(*)::BIGINT AS row_count,
+                    NULL::DATE AS first_date,
+                    NULL::DATE AS last_date,
+                    NULL::BIGINT AS unmatched_daily_rows
+                FROM tushare.stock_basic
+
+                UNION ALL
+
+                SELECT
+                    'tushare.trade_cal',
+                    health.expected_days,
+                    health.available_days,
+                    count(calendar.cal_date),
+                    min(calendar.cal_date),
+                    max(calendar.cal_date),
+                    NULL::BIGINT
+                FROM calendar_health AS health
+                LEFT JOIN ranged_calendar AS calendar ON true
+                GROUP BY health.expected_days, health.available_days
+
+                UNION ALL
+
+                SELECT
+                    'tushare.daily',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_daily AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM ranged_daily
+
+                UNION ALL
+
+                SELECT
+                    'tushare.adj_factor',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_factor AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    (
+                        SELECT count(*)
+                        FROM ranged_daily AS daily
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM ranged_factor AS factor
+                            WHERE factor.ts_code = daily.ts_code
+                              AND factor.trade_date = daily.trade_date
+                        )
+                    )
+                FROM ranged_factor
+
+                UNION ALL
+
+                SELECT
+                    'tushare.daily_basic',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_metrics AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    (
+                        SELECT count(*)
+                        FROM ranged_daily AS daily
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM ranged_metrics AS metrics
+                            WHERE metrics.ts_code = daily.ts_code
+                              AND metrics.trade_date = daily.trade_date
+                        )
+                    )
+                FROM ranged_metrics
+            ),
+            commits AS (
+                SELECT dataset_id, max(committed_at) AS last_committed_at
+                FROM meta.partitions
+                GROUP BY dataset_id
+            )
+            SELECT
+                coverage.dataset_id,
+                CASE
+                    WHEN coverage.dataset_id = 'tushare.stock_basic'
+                        AND coverage.row_count = 0 THEN 'EMPTY'
+                    WHEN coverage.dataset_id NOT IN (
+                        'tushare.stock_basic', 'tushare.trade_cal'
+                    ) AND calendar_health.available_days < calendar_health.expected_days
+                        THEN 'CALENDAR_INCOMPLETE'
+                    WHEN coalesce(coverage.available_days, 0)
+                            < coalesce(coverage.expected_days, 0)
+                        OR (
+                            coverage.dataset_id = 'tushare.adj_factor'
+                            AND coalesce(coverage.unmatched_daily_rows, 0) > 0
+                        ) THEN 'INCOMPLETE'
+                    ELSE 'HEALTHY'
+                END AS status,
+                coverage.expected_days,
+                coverage.available_days,
+                greatest(
+                    coalesce(coverage.expected_days, 0)
+                        - coalesce(coverage.available_days, 0),
+                    0
+                ) AS missing_days,
+                coverage.unmatched_daily_rows,
+                coverage.row_count,
+                coverage.first_date,
+                coverage.last_date,
+                commits.last_committed_at
+            FROM coverage
+            CROSS JOIN calendar_health
+            LEFT JOIN commits USING (dataset_id)
+            ORDER BY CASE coverage.dataset_id
+                WHEN 'tushare.stock_basic' THEN 1
+                WHEN 'tushare.trade_cal' THEN 2
+                WHEN 'tushare.daily' THEN 3
+                WHEN 'tushare.adj_factor' THEN 4
+                WHEN 'tushare.daily_basic' THEN 5
+            END
+            """,
+            params=[start, end],
+        )
 
     def status(self, dataset_id: str | None = None) -> duckdb.DuckDBPyRelation:
         query = """

@@ -57,6 +57,39 @@ def sync(
 
 
 @app.command()
+def update(
+    db: DatabaseOption = None,
+    start: Annotated[
+        str,
+        typer.Option(help="检查和补齐数据的开始日期 YYYY-MM-DD"),
+    ] = "2010-01-01",
+    end: Annotated[
+        str | None,
+        typer.Option(help="结束日期 YYYY-MM-DD，默认今天"),
+    ] = None,
+    show_progress: Annotated[
+        bool,
+        typer.Option("--progress/--no-progress", help="显示同步进度、速度和预计剩余时间"),
+    ] = True,
+) -> None:
+    try:
+        with QuantDB(db) as database:
+            progress = TqdmSyncProgress() if show_progress else None
+            reports = database.update(start=start, end=end, progress=progress)
+            for report in reports:
+                typer.echo(
+                    f"{report.dataset_id}: 成功 {report.completed} 个分区，"
+                    f"跳过 {report.skipped} 个分区"
+                )
+            typer.echo("\n数据集健康状态")
+            typer.echo(database.health(start=start, end=end))
+    except (KeyboardInterrupt, SyncInterruptedError) as exc:
+        _exit_with_error("更新已中断，已提交分区保留，当前分区将在下次重试", exc, code=130)
+    except (QuantDBError, ValueError) as exc:
+        _exit_with_error("更新失败", exc)
+
+
+@app.command()
 def status(
     db: DatabaseOption = None,
     dataset: Annotated[str | None, typer.Argument(help="可选的数据集名称")] = None,
@@ -66,6 +99,25 @@ def status(
             typer.echo(database.status(dataset))
     except (QuantDBError, ValueError) as exc:
         _exit_with_error("查询状态失败", exc)
+
+
+@app.command()
+def health(
+    db: DatabaseOption = None,
+    start: Annotated[
+        str,
+        typer.Option(help="健康检查开始日期 YYYY-MM-DD"),
+    ] = "2010-01-01",
+    end: Annotated[
+        str | None,
+        typer.Option(help="结束日期 YYYY-MM-DD，默认今天"),
+    ] = None,
+) -> None:
+    try:
+        with QuantDB(db) as database:
+            typer.echo(database.health(start=start, end=end))
+    except (QuantDBError, ValueError) as exc:
+        _exit_with_error("健康检查失败", exc)
 
 
 @app.command("sql")

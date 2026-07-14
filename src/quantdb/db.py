@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
+from typing import Literal
 
 import duckdb
 
 from quantdb.config import resolve_database_path, resolve_tushare_token
 from quantdb.provider import TushareClient, TushareProvider
-from quantdb.registry import get_dataset
+from quantdb.registry import get_dataset, parse_date
 from quantdb.store import DuckDBStore
 from quantdb.sync import DataProvider, SyncEngine, SyncProgress, SyncReport
 
@@ -53,6 +55,94 @@ class QuantDB:
 
     def sql(self, query: str) -> duckdb.DuckDBPyRelation:
         return self.store.sql(query)
+
+    def bars(
+        self,
+        symbols: str | Sequence[str] | None = None,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        adjust: Literal["none", "qfq", "hfq"] = "none",
+        as_of: str | date | datetime | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        if adjust not in {"none", "qfq", "hfq"}:
+            raise ValueError("adjust 只支持 'none'、'qfq' 或 'hfq'")
+        if as_of is not None and adjust != "qfq":
+            raise ValueError("as_of 只适用于 adjust='qfq'")
+
+        normalized_symbols: tuple[str, ...] | None
+        if symbols is None:
+            normalized_symbols = None
+        elif isinstance(symbols, str):
+            normalized_symbols = (symbols,)
+        else:
+            normalized_symbols = tuple(symbols)
+        if normalized_symbols is not None and not all(
+            isinstance(symbol, str) and symbol for symbol in normalized_symbols
+        ):
+            raise ValueError("symbols 必须是非空字符串或非空字符串序列")
+
+        start_date = parse_date(start) if start is not None else None
+        end_date = parse_date(end) if end is not None else None
+        as_of_date = parse_date(as_of) if as_of is not None else None
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+
+        return self.store.bars(
+            symbols=normalized_symbols,
+            start=start_date,
+            end=end_date,
+            adjust=adjust,
+            as_of=as_of_date,
+        )
+
+    def update(
+        self,
+        *,
+        start: str | date | datetime = "2010-01-01",
+        end: str | date | datetime | None = None,
+        progress: SyncProgress | None = None,
+    ) -> tuple[SyncReport, ...]:
+        start_date = parse_date(start)
+        end_date = parse_date(end) if end is not None else date.today()
+        if start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+
+        reports = [
+            self.sync("tushare.stock_basic", refresh=True, progress=progress),
+            self.sync(
+                "tushare.trade_cal",
+                start=start_date,
+                end=end_date,
+                progress=progress,
+            ),
+        ]
+        for dataset_id in (
+            "tushare.daily",
+            "tushare.adj_factor",
+            "tushare.daily_basic",
+        ):
+            reports.append(
+                self.sync(
+                    dataset_id,
+                    start=start_date,
+                    end=end_date,
+                    progress=progress,
+                )
+            )
+        return tuple(reports)
+
+    def health(
+        self,
+        *,
+        start: str | date | datetime = "2010-01-01",
+        end: str | date | datetime | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        start_date = parse_date(start)
+        end_date = parse_date(end) if end is not None else date.today()
+        if start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+        return self.store.health(start_date, end_date)
 
     def status(self, dataset_id: str | None = None) -> duckdb.DuckDBPyRelation:
         canonical_id = get_dataset(dataset_id).id if dataset_id is not None else None

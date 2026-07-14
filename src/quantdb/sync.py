@@ -122,10 +122,9 @@ class SyncEngine:
             raise ValueError("start 不能晚于 end")
 
         calendar_partitions = calendar_year_partitions(start_date, end_date)
+        existing_calendars = self.store.partition_ids(TRADE_CAL.id)
         missing_calendars = [
-            partition
-            for partition in calendar_partitions
-            if not self.store.partition_exists(TRADE_CAL.id, partition.id)
+            partition for partition in calendar_partitions if partition.id not in existing_calendars
         ]
         if missing_calendars:
             self._sync_partitions(TRADE_CAL, missing_calendars, refresh=False)
@@ -140,20 +139,20 @@ class SyncEngine:
         refresh: bool,
     ) -> SyncReport:
         results: list[PartitionResult] = []
+        existing_partitions = self.store.partition_ids(spec.id) if not refresh else set()
         if self.progress:
             self.progress.dataset_started(spec.id, len(partitions))
         try:
             for partition in partitions:
-                if self.progress:
-                    self.progress.partition_started(spec.id, partition.id)
-
-                if not refresh and self.store.partition_exists(spec.id, partition.id):
+                if partition.id in existing_partitions:
                     result = PartitionResult(spec.id, partition.id, "SKIPPED")
                     results.append(result)
                     if self.progress:
                         self.progress.partition_finished(result)
                     continue
 
+                if self.progress:
+                    self.progress.partition_started(spec.id, partition.id)
                 run_id = self.store.start_run(spec, partition)
                 try:
                     frame = self.provider.fetch(spec, partition)

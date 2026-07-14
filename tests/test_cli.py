@@ -2,6 +2,7 @@ from typer.testing import CliRunner
 
 from quantdb.cli import app
 from quantdb.errors import SyncInterruptedError
+from quantdb.sync import PartitionResult, SyncReport
 
 runner = CliRunner()
 
@@ -67,3 +68,72 @@ def test_sync_duckdb_interrupt_exits_with_code_130(monkeypatch):
 
     assert result.exit_code == 130
     assert "同步已中断" in result.output
+
+
+def test_update_runs_all_steps_and_prints_health(monkeypatch):
+    calls = []
+
+    class UpdatingQuantDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def update(self, **kwargs):
+            calls.append(("update", kwargs))
+            return (
+                SyncReport(
+                    "tushare.stock_basic",
+                    (PartitionResult("tushare.stock_basic", "full", "SUCCESS", 1),),
+                ),
+            )
+
+        def health(self, **kwargs):
+            calls.append(("health", kwargs))
+            return "HEALTHY DATASETS"
+
+    monkeypatch.setattr("quantdb.cli.QuantDB", lambda _path: UpdatingQuantDB())
+
+    result = runner.invoke(
+        app,
+        [
+            "update",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-03",
+            "--no-progress",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("update", {"start": "2024-01-01", "end": "2024-01-03", "progress": None}),
+        ("health", {"start": "2024-01-01", "end": "2024-01-03"}),
+    ]
+    assert "tushare.stock_basic: 成功 1 个分区" in result.output
+    assert "HEALTHY DATASETS" in result.output
+
+
+def test_health_command_forwards_date_range(monkeypatch):
+    class HealthyQuantDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def health(self, **kwargs):
+            assert kwargs == {"start": "2024-01-01", "end": "2024-01-03"}
+            return "HEALTH TABLE"
+
+    monkeypatch.setattr("quantdb.cli.QuantDB", lambda _path: HealthyQuantDB())
+
+    result = runner.invoke(
+        app,
+        ["health", "--start", "2024-01-01", "--end", "2024-01-03"],
+    )
+
+    assert result.exit_code == 0
+    assert "HEALTH TABLE" in result.output

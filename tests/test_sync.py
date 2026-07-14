@@ -197,7 +197,52 @@ def test_adj_factor_and_daily_basic_reuse_trading_day_sync(tmp_path):
         assert db.sql("SELECT version FROM meta.schema_version ORDER BY version").fetchall() == [
             (1,),
             (2,),
+            (3,),
+            (4,),
         ]
+
+
+def test_update_refreshes_stock_and_fills_all_missing_daily_datasets(tmp_path):
+    provider = FakeProvider()
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        reports = db.update(start="2024-01-01", end="2024-01-03")
+
+        assert [report.dataset_id for report in reports] == [
+            "tushare.stock_basic",
+            "tushare.trade_cal",
+            "tushare.daily",
+            "tushare.adj_factor",
+            "tushare.daily_basic",
+        ]
+        assert provider.calls == {
+            "tushare.stock_basic": 1,
+            "tushare.trade_cal": 1,
+            "tushare.daily": 2,
+            "tushare.adj_factor": 2,
+            "tushare.daily_basic": 2,
+        }
+        assert db.health(start="2024-01-01", end="2024-01-03").project(
+            "dataset_id, status"
+        ).fetchall() == [
+            ("tushare.stock_basic", "HEALTHY"),
+            ("tushare.trade_cal", "HEALTHY"),
+            ("tushare.daily", "HEALTHY"),
+            ("tushare.adj_factor", "HEALTHY"),
+            ("tushare.daily_basic", "HEALTHY"),
+        ]
+
+        second_reports = db.update(start="2024-01-01", end="2024-01-03")
+
+        assert provider.calls == {
+            "tushare.stock_basic": 2,
+            "tushare.trade_cal": 1,
+            "tushare.daily": 2,
+            "tushare.adj_factor": 2,
+            "tushare.daily_basic": 2,
+        }
+        assert second_reports[0].completed == 1
+        assert second_reports[1].skipped == 1
+        assert [report.skipped for report in second_reports[2:]] == [2, 2, 2]
 
 
 def test_failed_refresh_keeps_previous_partition(tmp_path):
