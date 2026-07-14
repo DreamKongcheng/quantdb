@@ -49,6 +49,41 @@ def daily_frame(day: str, close: object = 10.5) -> pd.DataFrame:
     )
 
 
+def adj_factor_frame(day: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "trade_date": [day],
+            "adj_factor": [123.456],
+        }
+    )
+
+
+def daily_basic_frame(day: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "trade_date": [day],
+            "close": [10.5],
+            "turnover_rate": [1.2],
+            "turnover_rate_f": [1.5],
+            "volume_ratio": [0.8],
+            "pe": [6.0],
+            "pe_ttm": [5.8],
+            "pb": [0.7],
+            "ps": [1.1],
+            "ps_ttm": [1.0],
+            "dv_ratio": [2.0],
+            "dv_ttm": [2.1],
+            "total_share": [19_405_918.2],
+            "float_share": [19_405_575.4],
+            "free_share": [10_000_000.0],
+            "total_mv": [20_000_000.0],
+            "circ_mv": [19_999_000.0],
+        }
+    )
+
+
 class FakeProvider:
     def __init__(self):
         self.calls = Counter()
@@ -71,6 +106,10 @@ class FakeProvider:
                     "pretrade_date": [None, f"{year - 1}1231", f"{year}0102"],
                 }
             )
+        if spec.id == "tushare.adj_factor":
+            return adj_factor_frame(str(partition.request_params["trade_date"]))
+        if spec.id == "tushare.daily_basic":
+            return daily_basic_frame(str(partition.request_params["trade_date"]))
         if self.fail_daily:
             raise ConnectionError("network interrupted")
         if self.interrupt_daily:
@@ -105,7 +144,7 @@ class RecordingProgress:
         self.events.append(("dataset_finished", dataset_id))
 
 
-def test_daily_sync_automatically_prepares_dependencies(tmp_path):
+def test_daily_sync_automatically_prepares_trade_calendar(tmp_path):
     provider = FakeProvider()
     progress = RecordingProgress()
     with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
@@ -118,20 +157,46 @@ def test_daily_sync_automatically_prepares_dependencies(tmp_path):
 
         assert report.completed == 2
         assert provider.calls == {
-            "tushare.stock_basic": 1,
             "tushare.trade_cal": 1,
             "tushare.daily": 2,
         }
         assert db.sql("SELECT count(*) FROM tushare.daily").fetchone()[0] == 2
         assert [event for event in progress.events if event[0] == "dataset_started"] == [
-            ("dataset_started", "tushare.stock_basic", 1),
             ("dataset_started", "tushare.trade_cal", 1),
             ("dataset_started", "tushare.daily", 2),
         ]
         assert [event for event in progress.events if event[0] == "dataset_finished"] == [
-            ("dataset_finished", "tushare.stock_basic"),
             ("dataset_finished", "tushare.trade_cal"),
             ("dataset_finished", "tushare.daily"),
+        ]
+
+
+def test_adj_factor_and_daily_basic_reuse_trading_day_sync(tmp_path):
+    provider = FakeProvider()
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        adj_report = db.sync(
+            "tushare.adj_factor",
+            start="2024-01-01",
+            end="2024-01-03",
+        )
+        basic_report = db.sync(
+            "tushare.daily_basic",
+            start="2024-01-01",
+            end="2024-01-03",
+        )
+
+        assert adj_report.completed == 2
+        assert basic_report.completed == 2
+        assert provider.calls == {
+            "tushare.trade_cal": 1,
+            "tushare.adj_factor": 2,
+            "tushare.daily_basic": 2,
+        }
+        assert db.sql("SELECT count(*) FROM tushare.adj_factor").fetchone()[0] == 2
+        assert db.sql("SELECT count(*) FROM tushare.daily_basic").fetchone()[0] == 2
+        assert db.sql("SELECT version FROM meta.schema_version ORDER BY version").fetchall() == [
+            (1,),
+            (2,),
         ]
 
 

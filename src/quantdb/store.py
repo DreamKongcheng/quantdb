@@ -81,6 +81,15 @@ class DuckDBStore:
         )
         for spec in DATASETS.values():
             self.connection.execute(spec.create_table_sql)
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 2, '增加 adj_factor 与 daily_basic 数据集', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 2
+            )
+            """
+        )
 
     def partition_exists(self, dataset_id: str, partition_id: str) -> bool:
         row = self.connection.execute(

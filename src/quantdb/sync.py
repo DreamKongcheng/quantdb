@@ -14,8 +14,6 @@ from quantdb.errors import (
     is_interruption_error,
 )
 from quantdb.registry import (
-    DAILY,
-    STOCK_BASIC,
     TRADE_CAL,
     DatasetSpec,
     Partition,
@@ -99,32 +97,29 @@ class SyncEngine:
     ) -> SyncReport:
         spec = get_dataset(dataset_id)
 
-        if spec.id == DAILY.id:
-            partitions = self._prepare_daily(start, end)
-        elif spec.id == TRADE_CAL.id:
+        if spec.partition_strategy == "trading_day":
+            partitions = self._prepare_trading_day(spec, start, end)
+        elif spec.partition_strategy == "calendar_year":
             partitions = calendar_year_partitions(start, end)
-        elif spec.id == STOCK_BASIC.id:
+        elif spec.partition_strategy == "full":
             partitions = [full_partition()]
         else:  # pragma: no cover - 注册表新增策略时的防御分支
             raise ValueError(f"数据集 {spec.id} 的分区策略尚未实现")
 
         return self._sync_partitions(spec, partitions, refresh=refresh)
 
-    def _prepare_daily(
+    def _prepare_trading_day(
         self,
+        spec: DatasetSpec,
         start: str | date | datetime | None,
         end: str | date | datetime | None,
     ) -> list[Partition]:
         if start is None:
-            raise ValueError("同步 tushare.daily 必须提供 start")
+            raise ValueError(f"同步 {spec.id} 必须提供 start")
         start_date = parse_date(start)
         end_date = parse_date(end) if end is not None else start_date
         if start_date > end_date:
             raise ValueError("start 不能晚于 end")
-
-        stock_partition = full_partition()
-        if not self.store.partition_exists(STOCK_BASIC.id, stock_partition.id):
-            self._sync_partitions(STOCK_BASIC, [stock_partition], refresh=False)
 
         calendar_partitions = calendar_year_partitions(start_date, end_date)
         missing_calendars = [
@@ -222,7 +217,7 @@ def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame)
     if duplicates.any():
         raise DatasetValidationError(f"{spec.id} 返回重复主键，共 {int(duplicates.sum())} 行")
 
-    if spec.id == DAILY.id:
+    if spec.partition_strategy == "trading_day":
         expected = str(partition.request_params["trade_date"])
         actual = set(frame["trade_date"].astype("string").str.strip().dropna())
         if actual != {expected}:

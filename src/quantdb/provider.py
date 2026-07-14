@@ -17,7 +17,7 @@ class TushareClient:
         token: str | None = None,
         *,
         api: object | None = None,
-        page_size: int = 5_000,
+        page_size: int = 6_000,
         retry_attempts: int = 3,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:

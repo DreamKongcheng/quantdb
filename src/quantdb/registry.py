@@ -135,10 +135,55 @@ DAILY = DatasetSpec(
     ),
     primary_key=("ts_code", "trade_date"),
     partition_strategy="trading_day",
-    dependencies=(STOCK_BASIC.id, TRADE_CAL.id),
+    dependencies=(TRADE_CAL.id,),
 )
 
-DATASETS: dict[str, DatasetSpec] = {spec.id: spec for spec in (STOCK_BASIC, TRADE_CAL, DAILY)}
+ADJ_FACTOR = DatasetSpec(
+    id="tushare.adj_factor",
+    endpoint="adj_factor",
+    table="tushare.adj_factor",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("adj_factor", "DOUBLE"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    partition_strategy="trading_day",
+    dependencies=(TRADE_CAL.id,),
+)
+
+DAILY_BASIC = DatasetSpec(
+    id="tushare.daily_basic",
+    endpoint="daily_basic",
+    table="tushare.daily_basic",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("close", "DOUBLE"),
+        column("turnover_rate", "DOUBLE"),
+        column("turnover_rate_f", "DOUBLE"),
+        column("volume_ratio", "DOUBLE"),
+        column("pe", "DOUBLE"),
+        column("pe_ttm", "DOUBLE"),
+        column("pb", "DOUBLE"),
+        column("ps", "DOUBLE"),
+        column("ps_ttm", "DOUBLE"),
+        column("dv_ratio", "DOUBLE"),
+        column("dv_ttm", "DOUBLE"),
+        column("total_share", "DOUBLE"),
+        column("float_share", "DOUBLE"),
+        column("free_share", "DOUBLE"),
+        column("total_mv", "DOUBLE"),
+        column("circ_mv", "DOUBLE"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    partition_strategy="trading_day",
+    dependencies=(TRADE_CAL.id,),
+)
+
+DATASETS: dict[str, DatasetSpec] = {
+    spec.id: spec for spec in (STOCK_BASIC, TRADE_CAL, DAILY, ADJ_FACTOR, DAILY_BASIC)
+}
 
 
 def get_dataset(dataset_id: str) -> DatasetSpec:

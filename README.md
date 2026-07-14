@@ -33,8 +33,12 @@ db.sync("tushare.stock_basic")
 # 交易日历按自然年分区。
 db.sync("tushare.trade_cal", start="2024-01-01", end="2026-12-31")
 
-# daily 会自动补齐缺失的 stock_basic 和 trade_cal 依赖。
+# 日频接口会自动补齐缺失的 trade_cal；stock_basic 是独立证券主数据。
 db.sync("tushare.daily", start="2026-07-01", end="2026-07-14")
+
+# 复权因子与每日估值、换手率等指标使用相同的交易日分区策略。
+db.sync("tushare.adj_factor", start="2026-07-01", end="2026-07-14")
+db.sync("tushare.daily_basic", start="2026-07-01", end="2026-07-14")
 
 prices = db.sql("""
     SELECT *
@@ -54,6 +58,8 @@ uv run quantdb sync tushare.stock_basic
 uv run quantdb sync tushare.daily \
   --start 2026-07-01 \
   --end 2026-07-14
+uv run quantdb sync tushare.adj_factor --start 2026-07-01 --end 2026-07-14
+uv run quantdb sync tushare.daily_basic --start 2026-07-01 --end 2026-07-14
 uv run quantdb status
 uv run quantdb sql "SELECT count(*) FROM tushare.daily"
 ```
@@ -86,6 +92,8 @@ meta.schema_version
 tushare.stock_basic
 tushare.trade_cal
 tushare.daily
+tushare.adj_factor
+tushare.daily_basic
 ```
 
 `tushare.*` 只做必要的数据库类型转换，不做复权、填充、去极值等业务清洗。
