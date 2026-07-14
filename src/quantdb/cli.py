@@ -6,7 +6,7 @@ from typing import Annotated
 import typer
 
 from quantdb import QuantDB, TqdmSyncProgress
-from quantdb.errors import QuantDBError
+from quantdb.errors import QuantDBError, SyncInterruptedError
 
 app = typer.Typer(no_args_is_help=True, help="本地 Tushare + DuckDB 量化数据库")
 
@@ -49,7 +49,7 @@ def sync(
                 refresh=refresh,
                 progress=progress,
             )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, SyncInterruptedError) as exc:
         _exit_with_error("同步已中断，已提交分区保留，当前分区将在下次重试", exc, code=130)
     except (QuantDBError, ValueError) as exc:
         _exit_with_error("同步失败", exc)

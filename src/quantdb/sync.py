@@ -7,7 +7,12 @@ from uuid import UUID
 
 import pandas as pd
 
-from quantdb.errors import DatasetValidationError, SyncError
+from quantdb.errors import (
+    DatasetValidationError,
+    SyncError,
+    SyncInterruptedError,
+    is_interruption_error,
+)
 from quantdb.registry import (
     DAILY,
     STOCK_BASIC,
@@ -160,6 +165,13 @@ class SyncEngine:
                     validate_frame(spec, partition, frame)
                     self.store.replace_partition(spec, partition, frame, run_id)
                 except Exception as exc:
+                    if is_interruption_error(exc):
+                        self._mark_run_interrupted(run_id, exc)
+                        if self.progress:
+                            self.progress.partition_interrupted(spec.id, partition.id, exc)
+                        raise SyncInterruptedError(
+                            f"{spec.id} 分区 {partition.id} 查询被中断"
+                        ) from exc
                     self._mark_run_failed(run_id, exc)
                     if self.progress:
                         self.progress.partition_failed(spec.id, partition.id, exc)

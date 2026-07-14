@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from quantdb import QuantDB
-from quantdb.errors import SyncError
+from quantdb.errors import SyncError, SyncInterruptedError
 from quantdb.registry import DAILY, daily_partition
 
 STOCK_COLUMNS = {
@@ -55,6 +55,7 @@ class FakeProvider:
         self.daily_close: object = 10.5
         self.fail_daily = False
         self.interrupt_daily = False
+        self.interrupt_query_daily = False
 
     def fetch(self, spec, partition):
         self.calls[spec.id] += 1
@@ -74,6 +75,8 @@ class FakeProvider:
             raise ConnectionError("network interrupted")
         if self.interrupt_daily:
             raise KeyboardInterrupt
+        if self.interrupt_query_daily:
+            raise RuntimeError("Query interrupted")
         return daily_frame(str(partition.request_params["trade_date"]), self.daily_close)
 
 
@@ -197,6 +200,24 @@ def test_keyboard_interrupt_during_fetch_keeps_old_partition(tmp_path):
         assert any(event[0] == "partition_interrupted" for event in progress.events)
 
 
+def test_duckdb_runtime_query_interrupt_is_classified_as_interrupted(tmp_path):
+    provider = FakeProvider()
+    progress = RecordingProgress()
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        db.sync("tushare.daily", start="2024-01-02")
+        provider.interrupt_query_daily = True
+
+        with pytest.raises(SyncInterruptedError):
+            db.sync("tushare.daily", start="2024-01-02", refresh=True, progress=progress)
+
+        assert db.sql("SELECT close FROM tushare.daily").fetchone()[0] == 10.5
+        assert db.sql(
+            "SELECT status, error_type, error_message FROM meta.sync_runs "
+            "WHERE dataset_id = 'tushare.daily' ORDER BY started_at DESC LIMIT 1"
+        ).fetchone() == ("INTERRUPTED", "RuntimeError", "Query interrupted")
+        assert any(event[0] == "partition_interrupted" for event in progress.events)
+
+
 class InterruptingConnection:
     def __init__(self, connection):
         self.connection = connection
@@ -240,6 +261,19 @@ def test_reopening_database_recovers_stale_running_status(tmp_path):
         assert db.sql(
             f"SELECT status, error_type FROM meta.sync_runs WHERE run_id = '{run_id}'"
         ).fetchone() == ("INTERRUPTED", "ProcessInterrupted")
+
+
+def test_reopening_database_repairs_old_query_interrupt_status(tmp_path):
+    path = tmp_path / "quantdb.duckdb"
+    provider = FakeProvider()
+    with QuantDB(path, provider=provider) as db:
+        run_id = db.store.start_run(DAILY, daily_partition(date(2024, 1, 2)))
+        db.store.mark_run_failed(run_id, RuntimeError("Query interrupted"))
+
+    with QuantDB(path, provider=provider) as db:
+        assert db.sql(
+            f"SELECT status, error_type FROM meta.sync_runs WHERE run_id = '{run_id}'"
+        ).fetchone() == ("INTERRUPTED", "RuntimeError")
 
 
 def test_late_error_cannot_overwrite_committed_success_status(tmp_path):

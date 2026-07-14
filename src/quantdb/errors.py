@@ -1,3 +1,6 @@
+import duckdb
+
+
 class QuantDBError(Exception):
     """quantdb 基础异常。"""
 
@@ -24,3 +27,13 @@ class FetchError(QuantDBError):
 
 class SyncError(QuantDBError):
     """一个数据分区同步失败。"""
+
+
+class SyncInterruptedError(QuantDBError):
+    """同步被底层查询引擎中断。"""
+
+
+def is_interruption_error(error: BaseException) -> bool:
+    if isinstance(error, (KeyboardInterrupt, SystemExit, duckdb.InterruptException)):
+        return True
+    return isinstance(error, RuntimeError) and str(error).strip().casefold() == "query interrupted"

@@ -148,6 +148,20 @@ class DuckDBStore:
             WHERE status = 'RUNNING'
             """
         )
+        self.connection.execute(
+            """
+            UPDATE meta.sync_runs
+            SET status = 'INTERRUPTED'
+            WHERE status = 'FAILED'
+              AND (
+                  error_type = 'InterruptException'
+                  OR (
+                      error_type = 'RuntimeError'
+                      AND lower(trim(error_message)) = 'query interrupted'
+                  )
+              )
+            """
+        )
 
     def replace_partition(
         self,
