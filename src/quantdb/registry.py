@@ -47,6 +47,7 @@ class DatasetSpec:
     allow_empty: bool = False
     dependencies: tuple[str, ...] = ()
     request_variants: tuple[Mapping[str, str], ...] = field(default_factory=lambda: ({},))
+    requests_per_minute: int | None = None
 
     @property
     def source_fields(self) -> tuple[str, ...]:
@@ -150,6 +151,7 @@ ADJ_FACTOR = DatasetSpec(
     primary_key=("ts_code", "trade_date"),
     partition_strategy="trading_day",
     dependencies=(TRADE_CAL.id,),
+    requests_per_minute=180,
 )
 
 DAILY_BASIC = DatasetSpec(
@@ -179,6 +181,7 @@ DAILY_BASIC = DatasetSpec(
     primary_key=("ts_code", "trade_date"),
     partition_strategy="trading_day",
     dependencies=(TRADE_CAL.id,),
+    requests_per_minute=180,
 )
 
 DATASETS: dict[str, DatasetSpec] = {

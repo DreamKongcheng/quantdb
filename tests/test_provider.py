@@ -52,6 +52,30 @@ class StockBasicAPI:
         return pd.DataFrame([row], columns=fields)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class RateLimitedOnceAPI:
+    def __init__(self):
+        self.calls = 0
+
+    def query(self, endpoint, **params):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("抱歉，您访问接口(adj_factor)频率超限(200次/分钟)")
+        return pd.DataFrame({"id": [1]})
+
+
 def test_query_all_reads_every_page():
     api = PaginatedAPI()
     client = TushareClient(api=api, page_size=2, retry_attempts=1)
@@ -84,3 +108,42 @@ def test_stock_basic_fetches_all_statuses_before_returning():
 
     assert api.statuses == ["L", "D", "P"]
     assert result["list_status"].tolist() == ["L", "D", "P"]
+
+
+def test_query_all_throttles_every_request_for_an_endpoint():
+    api = PaginatedAPI()
+    clock = FakeClock()
+    client = TushareClient(
+        api=api,
+        page_size=2,
+        retry_attempts=1,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    client.query_all(
+        "example",
+        fields=("id",),
+        params={},
+        requests_per_minute=120,
+    )
+
+    assert clock.sleeps == [0.5]
+
+
+def test_query_all_cools_down_and_retries_after_rate_limit(caplog):
+    api = RateLimitedOnceAPI()
+    clock = FakeClock()
+    client = TushareClient(
+        api=api,
+        retry_attempts=2,
+        rate_limit_cooldown=61.0,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    result = client.query_all("adj_factor", fields=("id",), params={})
+
+    assert result["id"].tolist() == [1]
+    assert clock.sleeps == [61.0]
+    assert "61.0 秒后重试" in caplog.text

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 
@@ -7,6 +8,8 @@ import pandas as pd
 
 from quantdb.errors import FetchError
 from quantdb.registry import DatasetSpec, Partition
+
+logger = logging.getLogger(__name__)
 
 
 class TushareClient:
@@ -19,7 +22,9 @@ class TushareClient:
         api: object | None = None,
         page_size: int = 6_000,
         retry_attempts: int = 3,
+        rate_limit_cooldown: float = 61.0,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if api is None:
             if not token:
@@ -30,7 +35,10 @@ class TushareClient:
         self._api = api
         self.page_size = page_size
         self.retry_attempts = retry_attempts
+        self.rate_limit_cooldown = rate_limit_cooldown
         self._sleep = sleep
+        self._monotonic = monotonic
+        self._last_request_at: dict[str, float] = {}
 
     def query_all(
         self,
@@ -38,6 +46,7 @@ class TushareClient:
         *,
         fields: tuple[str, ...],
         params: dict[str, str | int],
+        requests_per_minute: int | None = None,
     ) -> pd.DataFrame:
         pages: list[pd.DataFrame] = []
         offset = 0
@@ -48,6 +57,7 @@ class TushareClient:
                 endpoint,
                 fields=fields,
                 params={**params, "limit": self.page_size, "offset": offset},
+                requests_per_minute=requests_per_minute,
             )
             if not isinstance(page, pd.DataFrame):
                 raise FetchError(f"Tushare 接口 {endpoint} 未返回 pandas.DataFrame")
@@ -84,16 +94,45 @@ class TushareClient:
         *,
         fields: tuple[str, ...],
         params: dict[str, str | int],
+        requests_per_minute: int | None,
     ) -> pd.DataFrame:
         last_error: Exception | None = None
         for attempt in range(self.retry_attempts):
+            self._wait_for_rate_limit(endpoint, requests_per_minute)
             try:
                 return self._api.query(endpoint, fields=",".join(fields), **params)
             except Exception as exc:  # Tushare SDK 没有稳定的结构化异常层级
                 last_error = exc
                 if attempt + 1 < self.retry_attempts:
-                    self._sleep(float(2**attempt))
+                    delay = (
+                        self.rate_limit_cooldown if _is_rate_limit_error(exc) else float(2**attempt)
+                    )
+                    logger.warning(
+                        "Tushare 接口 %s 请求失败，%.1f 秒后重试（%d/%d）：%s",
+                        endpoint,
+                        delay,
+                        attempt + 1,
+                        self.retry_attempts,
+                        exc,
+                    )
+                    self._sleep(delay)
         raise FetchError(f"Tushare 接口 {endpoint} 请求失败：{last_error}") from last_error
+
+    def _wait_for_rate_limit(self, endpoint: str, requests_per_minute: int | None) -> None:
+        if requests_per_minute is None:
+            return
+        if requests_per_minute <= 0:
+            raise ValueError("requests_per_minute 必须大于 0")
+
+        interval = 60.0 / requests_per_minute
+        now = self._monotonic()
+        last_request_at = self._last_request_at.get(endpoint)
+        if last_request_at is not None:
+            delay = interval - (now - last_request_at)
+            if delay > 0:
+                self._sleep(delay)
+                now = self._monotonic()
+        self._last_request_at[endpoint] = now
 
 
 class TushareProvider:
@@ -109,8 +148,14 @@ class TushareProvider:
                     spec.endpoint,
                     fields=spec.source_fields,
                     params=params,
+                    requests_per_minute=spec.requests_per_minute,
                 )
             )
         if not frames:
             return pd.DataFrame(columns=list(spec.source_fields))
         return pd.concat(frames, ignore_index=True)
+
+
+def _is_rate_limit_error(error: Exception) -> bool:
+    message = str(error)
+    return "频率超限" in message or "每分钟" in message and "次数" in message
