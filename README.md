@@ -68,6 +68,10 @@ uv run quantdb sync tushare.daily \
   --no-progress
 ```
 
+使用 `Ctrl+C` 中断时，已经提交的分区保持不变，当前分区显式回滚并记录为
+`INTERRUPTED`。再次执行相同命令会跳过成功分区并重试未完成分区。进程被强制
+终止或机器断电后，遗留的 `RUNNING` 会在下次打开数据库时恢复为 `INTERRUPTED`。
+
 数据库路径的优先级为 `--db`、系统环境变量 `QUANTDB_PATH`、`.env` 中的
 `QUANTDB_PATH`、当前目录的 `quantdb.duckdb`。路径中的 `~` 会自动展开。
 

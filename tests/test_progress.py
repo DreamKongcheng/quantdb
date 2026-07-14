@@ -24,3 +24,19 @@ def test_tqdm_progress_shows_partition_counters():
     assert "成功=1" in rendered
     assert "跳过=1" in rendered
     assert "数据行=5524" in rendered
+
+
+def test_tqdm_progress_shows_interrupted_partition():
+    output = StringIO()
+    progress = TqdmSyncProgress(file=output)
+
+    progress.dataset_started("tushare.daily", 1)
+    progress.partition_started("tushare.daily", "trade_date=2026-07-14")
+    progress.partition_interrupted(
+        "tushare.daily",
+        "trade_date=2026-07-14",
+        KeyboardInterrupt(),
+    )
+    progress.dataset_finished("tushare.daily")
+
+    assert "已中断=trade_date=2026-07-14" in output.getvalue()

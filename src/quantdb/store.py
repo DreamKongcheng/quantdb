@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from datetime import date
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -68,6 +69,7 @@ class DuckDBStore:
             )
             """
         )
+        self.recover_interrupted_runs()
         self.connection.execute(
             """
             INSERT INTO meta.schema_version
@@ -117,9 +119,34 @@ class DuckDBStore:
                 finished_at = current_timestamp,
                 error_type = ?,
                 error_message = ?
-            WHERE run_id = ?
+            WHERE run_id = ? AND status = 'RUNNING'
             """,
             [type(error).__name__, str(error)[:4_000], str(run_id)],
+        )
+
+    def mark_run_interrupted(self, run_id: UUID, error: BaseException) -> None:
+        self.connection.execute(
+            """
+            UPDATE meta.sync_runs
+            SET status = 'INTERRUPTED',
+                finished_at = current_timestamp,
+                error_type = ?,
+                error_message = ?
+            WHERE run_id = ? AND status = 'RUNNING'
+            """,
+            [type(error).__name__, str(error)[:4_000] or "同步进程被中断", str(run_id)],
+        )
+
+    def recover_interrupted_runs(self) -> None:
+        self.connection.execute(
+            """
+            UPDATE meta.sync_runs
+            SET status = 'INTERRUPTED',
+                finished_at = current_timestamp,
+                error_type = 'ProcessInterrupted',
+                error_message = '上次同步进程未正常结束，已在数据库重新打开时恢复状态'
+            WHERE status = 'RUNNING'
+            """
         )
 
     def replace_partition(
@@ -130,9 +157,13 @@ class DuckDBStore:
         run_id: UUID,
     ) -> None:
         incoming_name = f"_incoming_{run_id.hex}"
-        self.connection.register(incoming_name, frame)
+        registered = False
+        transaction_open = False
         try:
+            self.connection.register(incoming_name, frame)
+            registered = True
             self.connection.execute("BEGIN TRANSACTION")
+            transaction_open = True
             if partition.delete_where is None:
                 self.connection.execute(f"DELETE FROM {spec.table}")
             else:
@@ -183,11 +214,16 @@ class DuckDBStore:
                 [len(frame), str(run_id)],
             )
             self.connection.execute("COMMIT")
-        except Exception:
-            self.connection.execute("ROLLBACK")
+            transaction_open = False
+        except BaseException:
+            if transaction_open:
+                # 保留原始异常；连接关闭时 DuckDB 仍会清理未提交事务。
+                with suppress(duckdb.Error):
+                    self.connection.execute("ROLLBACK")
             raise
         finally:
-            self.connection.unregister(incoming_name)
+            if registered:
+                self.connection.unregister(incoming_name)
 
     def open_dates(self, start: date, end: date, *, exchange: str = "SSE") -> list[date]:
         rows = self.connection.execute(

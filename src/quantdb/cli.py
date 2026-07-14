@@ -49,6 +49,8 @@ def sync(
                 refresh=refresh,
                 progress=progress,
             )
+    except KeyboardInterrupt as exc:
+        _exit_with_error("同步已中断，已提交分区保留，当前分区将在下次重试", exc, code=130)
     except (QuantDBError, ValueError) as exc:
         _exit_with_error("同步失败", exc)
     typer.echo(f"{report.dataset_id}: 成功 {report.completed} 个分区，跳过 {report.skipped} 个分区")
@@ -78,6 +80,7 @@ def run_sql(
         _exit_with_error("SQL 执行失败", exc)
 
 
-def _exit_with_error(prefix: str, error: Exception) -> None:
-    typer.echo(f"{prefix}：{error}", err=True)
-    raise typer.Exit(code=1) from error
+def _exit_with_error(prefix: str, error: BaseException, *, code: int = 1) -> None:
+    detail = f"：{error}" if str(error) else ""
+    typer.echo(f"{prefix}{detail}", err=True)
+    raise typer.Exit(code=code) from error

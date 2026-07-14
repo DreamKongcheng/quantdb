@@ -63,6 +63,16 @@ class TqdmSyncProgress:
             self._bar.set_postfix_str(f"失败={partition_id}", refresh=True)
             self._bar.write(f"{dataset_id} {partition_id} 失败：{error}", file=self.file)
 
+    def partition_interrupted(
+        self,
+        dataset_id: str,
+        partition_id: str,
+        error: BaseException,
+    ) -> None:
+        if self._bar is not None:
+            self._bar.set_postfix_str(f"已中断={partition_id}", refresh=True)
+            self._bar.write(f"{dataset_id} {partition_id} 已中断", file=self.file)
+
     def dataset_finished(self, dataset_id: str) -> None:
         self._close_bar()
 

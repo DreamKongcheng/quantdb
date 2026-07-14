@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
+from uuid import UUID
 
 import pandas as pd
 
@@ -38,6 +39,13 @@ class SyncProgress(Protocol):
         dataset_id: str,
         partition_id: str,
         error: Exception,
+    ) -> None: ...
+
+    def partition_interrupted(
+        self,
+        dataset_id: str,
+        partition_id: str,
+        error: BaseException,
     ) -> None: ...
 
     def dataset_finished(self, dataset_id: str) -> None: ...
@@ -152,10 +160,15 @@ class SyncEngine:
                     validate_frame(spec, partition, frame)
                     self.store.replace_partition(spec, partition, frame, run_id)
                 except Exception as exc:
-                    self.store.mark_run_failed(run_id, exc)
+                    self._mark_run_failed(run_id, exc)
                     if self.progress:
                         self.progress.partition_failed(spec.id, partition.id, exc)
                     raise SyncError(f"同步 {spec.id} 分区 {partition.id} 失败：{exc}") from exc
+                except BaseException as exc:
+                    self._mark_run_interrupted(run_id, exc)
+                    if self.progress:
+                        self.progress.partition_interrupted(spec.id, partition.id, exc)
+                    raise
                 result = PartitionResult(spec.id, partition.id, "SUCCESS", len(frame))
                 results.append(result)
                 if self.progress:
@@ -165,6 +178,18 @@ class SyncEngine:
                 self.progress.dataset_finished(spec.id)
 
         return SyncReport(spec.id, tuple(results))
+
+    def _mark_run_failed(self, run_id: UUID, error: Exception) -> None:
+        try:
+            self.store.mark_run_failed(run_id, error)
+        except Exception as metadata_error:
+            error.add_note(f"记录 FAILED 状态时发生异常：{metadata_error}")
+
+    def _mark_run_interrupted(self, run_id: UUID, error: BaseException) -> None:
+        try:
+            self.store.mark_run_interrupted(run_id, error)
+        except Exception as metadata_error:
+            error.add_note(f"记录 INTERRUPTED 状态时发生异常：{metadata_error}")
 
 
 def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame) -> None:
