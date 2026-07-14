@@ -3,6 +3,7 @@ from datetime import date
 import pytest
 
 from quantdb import QuantDB
+from quantdb.errors import ReadOnlyDatabaseError
 
 
 def seed_bars(db: QuantDB) -> None:
@@ -267,3 +268,18 @@ def test_market_schema_initialization_is_idempotent(tmp_path):
             (4,),
         ]
         assert db.bars("000001.SZ", adjust="qfq").count("*").fetchone() == (2,)
+
+
+def test_read_only_database_supports_research_queries_and_rejects_updates(tmp_path):
+    path = tmp_path / "quantdb.duckdb"
+    with QuantDB(path) as db:
+        seed_bars(db)
+
+    with QuantDB(path, read_only=True) as db:
+        assert db.panel("000001.SZ", adjust="hfq").count("*").fetchone() == (2,)
+        with pytest.raises(ReadOnlyDatabaseError, match="只读"):
+            db.init()
+        with pytest.raises(ReadOnlyDatabaseError, match="只读"):
+            db.sync("tushare.stock_basic")
+        with pytest.raises(ReadOnlyDatabaseError, match="只读"):
+            db.update(start="2024-01-01", end="2024-01-02")

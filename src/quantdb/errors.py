@@ -13,6 +13,10 @@ class DatabaseConnectionError(QuantDBError):
     """DuckDB 数据库无法打开。"""
 
 
+class ReadOnlyDatabaseError(QuantDBError):
+    """只读数据库连接不允许执行写操作。"""
+
+
 class DatasetNotFoundError(QuantDBError):
     """数据集未注册。"""
 

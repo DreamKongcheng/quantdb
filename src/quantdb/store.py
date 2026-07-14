@@ -16,17 +16,19 @@ from quantdb.registry import DATASETS, DatasetSpec, Partition, quote_identifier
 
 
 class DuckDBStore:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path).expanduser()
-        if str(self.path) != ":memory:":
+        self.read_only = read_only
+        if str(self.path) != ":memory:" and not read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.connection = duckdb.connect(str(self.path))
+            self.connection = duckdb.connect(str(self.path), read_only=read_only)
         except duckdb.IOException as exc:
             raise DatabaseConnectionError(
                 f"无法打开 DuckDB 数据库 {self.path}。文件可能正被其他进程占用：{exc}"
             ) from exc
-        self.initialize()
+        if not read_only:
+            self.initialize()
 
     def initialize(self) -> None:
         self.connection.execute("CREATE SCHEMA IF NOT EXISTS meta")

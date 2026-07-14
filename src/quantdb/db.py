@@ -8,6 +8,7 @@ from typing import Literal
 import duckdb
 
 from quantdb.config import resolve_database_path, resolve_tushare_token
+from quantdb.errors import ReadOnlyDatabaseError
 from quantdb.provider import TushareClient, TushareProvider
 from quantdb.registry import get_dataset, parse_date
 from quantdb.store import DuckDBStore
@@ -22,14 +23,17 @@ class QuantDB:
         tushare_token: str | None = None,
         env_file: str | Path | None = ".env",
         provider: DataProvider | None = None,
+        read_only: bool = False,
     ) -> None:
         self.path = resolve_database_path(path, env_file)
-        self.store = DuckDBStore(self.path)
+        self.read_only = read_only
+        self.store = DuckDBStore(self.path, read_only=read_only)
         self._tushare_token = tushare_token
         self._env_file = env_file
         self._provider = provider
 
     def init(self) -> None:
+        self._require_writable("初始化数据库")
         self.store.initialize()
 
     def sync(
@@ -41,6 +45,7 @@ class QuantDB:
         refresh: bool = False,
         progress: SyncProgress | None = None,
     ) -> SyncReport:
+        self._require_writable("同步数据")
         provider = self._provider
         if provider is None:
             token = resolve_tushare_token(self._tushare_token, self._env_file)
@@ -142,6 +147,7 @@ class QuantDB:
         end: str | date | datetime | None = None,
         progress: SyncProgress | None = None,
     ) -> tuple[SyncReport, ...]:
+        self._require_writable("更新数据")
         start_date = parse_date(start)
         end_date = parse_date(end) if end is not None else date.today()
         if start_date > end_date:
@@ -186,6 +192,10 @@ class QuantDB:
     def status(self, dataset_id: str | None = None) -> duckdb.DuckDBPyRelation:
         canonical_id = get_dataset(dataset_id).id if dataset_id is not None else None
         return self.store.status(canonical_id)
+
+    def _require_writable(self, operation: str) -> None:
+        if self.read_only:
+            raise ReadOnlyDatabaseError(f"只读数据库连接不能{operation}")
 
     def close(self) -> None:
         self.store.close()
