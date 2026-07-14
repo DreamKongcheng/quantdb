@@ -44,7 +44,7 @@ prices = db.sql("""
     SELECT *
     FROM tushare.daily
     ORDER BY trade_date, ts_code
-""").pl()
+""")
 
 # 标准行情查询。adjust 支持 none、qfq、hfq，结果仍是 DuckDB relation。
 bars = db.bars(
@@ -53,7 +53,16 @@ bars = db.bars(
     end="2024-12-31",
     adjust="qfq",
     as_of="2024-12-31",
-).pl()
+)
+
+# 在相同复权语义下，将行情与换手率、估值、市值等每日指标合并。
+panel = db.panel(
+    ["000001.SZ", "600000.SH"],
+    start="2020-01-01",
+    end="2024-12-31",
+    adjust="qfq",
+    as_of="2024-12-31",
+)
 
 # 刷新股票基础信息，并补齐 2010 年以来缺失的日历和三个日频数据集。
 reports = db.update()
@@ -65,7 +74,9 @@ health = db.health(start="2010-01-01", end="2024-12-31")
 已有分区默认跳过。需要从 Tushare 重新获取并原子替换时，传入
 `refresh=True`。`bars()` 默认返回不复权价格；QFQ 不传 `as_of` 时使用数据库中
 每只股票最新的复权因子，传入 `as_of` 时则使用该日期当时可得的最后一个复权因子，
-适合需要固定回测口径的场景。
+适合需要固定回测口径的场景。`panel()` 使用相同的查询和复权参数，并在行情列后
+追加 `daily_metrics`；其中 `close` 始终来自行情数据。以上查询返回 DuckDB relation；
+研究项目安装 Polars 后可以在最终结果上调用 `.pl()`。
 
 ## CLI
 

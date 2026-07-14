@@ -65,6 +65,51 @@ class QuantDB:
         adjust: Literal["none", "qfq", "hfq"] = "none",
         as_of: str | date | datetime | None = None,
     ) -> duckdb.DuckDBPyRelation:
+        normalized_symbols, start_date, end_date, adjust, as_of_date = self._normalize_market_query(
+            symbols, start, end, adjust, as_of
+        )
+        return self.store.bars(
+            symbols=normalized_symbols,
+            start=start_date,
+            end=end_date,
+            adjust=adjust,
+            as_of=as_of_date,
+        )
+
+    def panel(
+        self,
+        symbols: str | Sequence[str] | None = None,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+        adjust: Literal["none", "qfq", "hfq"] = "none",
+        as_of: str | date | datetime | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        normalized_symbols, start_date, end_date, adjust, as_of_date = self._normalize_market_query(
+            symbols, start, end, adjust, as_of
+        )
+        return self.store.panel(
+            symbols=normalized_symbols,
+            start=start_date,
+            end=end_date,
+            adjust=adjust,
+            as_of=as_of_date,
+        )
+
+    def _normalize_market_query(
+        self,
+        symbols: str | Sequence[str] | None,
+        start: str | date | datetime | None,
+        end: str | date | datetime | None,
+        adjust: Literal["none", "qfq", "hfq"],
+        as_of: str | date | datetime | None,
+    ) -> tuple[
+        tuple[str, ...] | None,
+        date | None,
+        date | None,
+        Literal["none", "qfq", "hfq"],
+        date | None,
+    ]:
         if adjust not in {"none", "qfq", "hfq"}:
             raise ValueError("adjust 只支持 'none'、'qfq' 或 'hfq'")
         if as_of is not None and adjust != "qfq":
@@ -88,13 +133,7 @@ class QuantDB:
         if start_date is not None and end_date is not None and start_date > end_date:
             raise ValueError("start 不能晚于 end")
 
-        return self.store.bars(
-            symbols=normalized_symbols,
-            start=start_date,
-            end=end_date,
-            adjust=adjust,
-            as_of=as_of_date,
-        )
+        return normalized_symbols, start_date, end_date, adjust, as_of_date
 
     def update(
         self,

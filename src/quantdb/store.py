@@ -479,6 +479,43 @@ class DuckDBStore:
         adjust: Literal["none", "qfq", "hfq"],
         as_of: date | None,
     ) -> duckdb.DuckDBPyRelation:
+        return self._market_data(
+            symbols=symbols,
+            start=start,
+            end=end,
+            adjust=adjust,
+            as_of=as_of,
+            include_metrics=False,
+        )
+
+    def panel(
+        self,
+        *,
+        symbols: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+        adjust: Literal["none", "qfq", "hfq"],
+        as_of: date | None,
+    ) -> duckdb.DuckDBPyRelation:
+        return self._market_data(
+            symbols=symbols,
+            start=start,
+            end=end,
+            adjust=adjust,
+            as_of=as_of,
+            include_metrics=True,
+        )
+
+    def _market_data(
+        self,
+        *,
+        symbols: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+        adjust: Literal["none", "qfq", "hfq"],
+        as_of: date | None,
+        include_metrics: bool,
+    ) -> duckdb.DuckDBPyRelation:
         params: list[object] = []
         if adjust == "qfq" and as_of is not None:
             source = "market.daily_bar_qfq_asof(?::DATE)"
@@ -490,25 +527,67 @@ class DuckDBStore:
                 "hfq": "market.daily_bar_hfq",
             }[adjust]
 
+        if include_metrics:
+            anchor_adj_factor = (
+                "bar.anchor_adj_factor" if adjust == "qfq" else "NULL::DOUBLE AS anchor_adj_factor"
+            )
+            select_list = f"""
+                bar.ts_code,
+                bar.trade_date,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.pre_close,
+                bar.change,
+                bar.pct_chg,
+                bar.vol,
+                bar.amount,
+                bar.adj_factor,
+                {anchor_adj_factor},
+                metrics.turnover_rate,
+                metrics.turnover_rate_f,
+                metrics.volume_ratio,
+                metrics.pe,
+                metrics.pe_ttm,
+                metrics.pb,
+                metrics.ps,
+                metrics.ps_ttm,
+                metrics.dv_ratio,
+                metrics.dv_ttm,
+                metrics.total_share,
+                metrics.float_share,
+                metrics.free_share,
+                metrics.total_mv,
+                metrics.circ_mv
+            """
+            metrics_join = """
+                LEFT JOIN market.daily_metrics AS metrics
+                    USING (ts_code, trade_date)
+            """
+        else:
+            select_list = "bar.*"
+            metrics_join = ""
+
         filters: list[str] = []
         if symbols is not None:
             if symbols:
                 placeholders = ", ".join("?" for _ in symbols)
-                filters.append(f"ts_code IN ({placeholders})")
+                filters.append(f"bar.ts_code IN ({placeholders})")
                 params.extend(symbols)
             else:
                 filters.append("false")
         if start is not None:
-            filters.append("trade_date >= ?::DATE")
+            filters.append("bar.trade_date >= ?::DATE")
             params.append(start)
         if end is not None:
-            filters.append("trade_date <= ?::DATE")
+            filters.append("bar.trade_date <= ?::DATE")
             params.append(end)
 
-        query = f"SELECT * FROM {source}"
+        query = f"SELECT {select_list} FROM {source} AS bar {metrics_join}"
         if filters:
             query += " WHERE " + " AND ".join(filters)
-        query += " ORDER BY trade_date, ts_code"
+        query += " ORDER BY bar.trade_date, bar.ts_code"
         return self.connection.sql(query, params=params)
 
     def health(self, start: date, end: date) -> duckdb.DuckDBPyRelation:

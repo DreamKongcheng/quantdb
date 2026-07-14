@@ -208,6 +208,40 @@ def test_bars_filters_symbols_dates_and_adjustment_mode(tmp_path):
         assert db.bars([], adjust="none").fetchall() == []
 
 
+def test_panel_combines_adjusted_bars_and_daily_metrics(tmp_path):
+    with QuantDB(tmp_path / "quantdb.duckdb") as db:
+        seed_bars(db)
+        db.sql(
+            """
+            INSERT INTO tushare.daily_basic (
+                ts_code, trade_date, close, turnover_rate, pe
+            ) VALUES
+                ('000001.SZ', DATE '2024-01-01', 999.0, 1.1, 6.1),
+                ('000001.SZ', DATE '2024-01-02', 999.0, 1.2, 6.2)
+            """
+        )
+
+        assert db.panel("000001.SZ", adjust="qfq").project(
+            "trade_date, close, anchor_adj_factor, turnover_rate, pe"
+        ).fetchall() == [
+            (date(2024, 1, 1), 5.0, 2.0, 1.1, 6.1),
+            (date(2024, 1, 2), 5.0, 2.0, 1.2, 6.2),
+        ]
+        assert db.panel(
+            "000001.SZ",
+            adjust="qfq",
+            as_of="2024-01-01",
+        ).project("trade_date, close, anchor_adj_factor, turnover_rate").fetchall() == [
+            (date(2024, 1, 1), 10.0, 1.0, 1.1)
+        ]
+        assert db.panel("000001.SZ", adjust="hfq").project(
+            "close, anchor_adj_factor, turnover_rate"
+        ).fetchall() == [
+            (10.0, None, 1.1),
+            (10.0, None, 1.2),
+        ]
+
+
 def test_bars_validates_query_parameters(tmp_path):
     with QuantDB(tmp_path / "quantdb.duckdb") as db:
         with pytest.raises(ValueError, match="adjust"):
