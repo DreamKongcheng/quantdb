@@ -1,0 +1,40 @@
+[project]
+name = "quantdb"
+version = "0.1.0"
+description = "基于 Tushare 和 DuckDB 的本地量化数据库"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "duckdb>=1.4.0",
+    "pandas>=2.2.0",
+    "python-dotenv>=1.0.1",
+    "tushare>=1.4.24",
+    "typer>=0.16.0",
+]
+
+[project.scripts]
+quantdb = "quantdb.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.12.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantdb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".uv-cache", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
