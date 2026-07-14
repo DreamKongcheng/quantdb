@@ -9,7 +9,7 @@ from quantdb.config import resolve_database_path, resolve_tushare_token
 from quantdb.provider import TushareClient, TushareProvider
 from quantdb.registry import get_dataset
 from quantdb.store import DuckDBStore
-from quantdb.sync import DataProvider, SyncEngine, SyncReport
+from quantdb.sync import DataProvider, SyncEngine, SyncProgress, SyncReport
 
 
 class QuantDB:
@@ -37,13 +37,14 @@ class QuantDB:
         start: str | date | datetime | None = None,
         end: str | date | datetime | None = None,
         refresh: bool = False,
+        progress: SyncProgress | None = None,
     ) -> SyncReport:
         provider = self._provider
         if provider is None:
             token = resolve_tushare_token(self._tushare_token, self._env_file)
             provider = TushareProvider(TushareClient(token))
             self._provider = provider
-        return SyncEngine(self.store, provider).sync(
+        return SyncEngine(self.store, provider, progress).sync(
             dataset_id,
             start=start,
             end=end,

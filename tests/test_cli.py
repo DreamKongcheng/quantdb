@@ -14,3 +14,11 @@ def test_init_uses_quantdb_path_from_environment(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert database_path.exists()
     assert str(database_path) in result.output
+
+
+def test_sync_help_exposes_progress_switch():
+    result = runner.invoke(app, ["sync", "--help"])
+
+    assert result.exit_code == 0
+    assert "--progress" in result.output
+    assert "--no-progress" in result.output

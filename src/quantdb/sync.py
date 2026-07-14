@@ -26,6 +26,23 @@ class DataProvider(Protocol):
     def fetch(self, spec: DatasetSpec, partition: Partition) -> pd.DataFrame: ...
 
 
+class SyncProgress(Protocol):
+    def dataset_started(self, dataset_id: str, total: int) -> None: ...
+
+    def partition_started(self, dataset_id: str, partition_id: str) -> None: ...
+
+    def partition_finished(self, result: PartitionResult) -> None: ...
+
+    def partition_failed(
+        self,
+        dataset_id: str,
+        partition_id: str,
+        error: Exception,
+    ) -> None: ...
+
+    def dataset_finished(self, dataset_id: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class PartitionResult:
     dataset_id: str
@@ -49,9 +66,15 @@ class SyncReport:
 
 
 class SyncEngine:
-    def __init__(self, store: DuckDBStore, provider: DataProvider) -> None:
+    def __init__(
+        self,
+        store: DuckDBStore,
+        provider: DataProvider,
+        progress: SyncProgress | None = None,
+    ) -> None:
         self.store = store
         self.provider = provider
+        self.progress = progress
 
     def sync(
         self,
@@ -109,20 +132,37 @@ class SyncEngine:
         refresh: bool,
     ) -> SyncReport:
         results: list[PartitionResult] = []
-        for partition in partitions:
-            if not refresh and self.store.partition_exists(spec.id, partition.id):
-                results.append(PartitionResult(spec.id, partition.id, "SKIPPED"))
-                continue
+        if self.progress:
+            self.progress.dataset_started(spec.id, len(partitions))
+        try:
+            for partition in partitions:
+                if self.progress:
+                    self.progress.partition_started(spec.id, partition.id)
 
-            run_id = self.store.start_run(spec, partition)
-            try:
-                frame = self.provider.fetch(spec, partition)
-                validate_frame(spec, partition, frame)
-                self.store.replace_partition(spec, partition, frame, run_id)
-            except Exception as exc:
-                self.store.mark_run_failed(run_id, exc)
-                raise SyncError(f"同步 {spec.id} 分区 {partition.id} 失败：{exc}") from exc
-            results.append(PartitionResult(spec.id, partition.id, "SUCCESS", len(frame)))
+                if not refresh and self.store.partition_exists(spec.id, partition.id):
+                    result = PartitionResult(spec.id, partition.id, "SKIPPED")
+                    results.append(result)
+                    if self.progress:
+                        self.progress.partition_finished(result)
+                    continue
+
+                run_id = self.store.start_run(spec, partition)
+                try:
+                    frame = self.provider.fetch(spec, partition)
+                    validate_frame(spec, partition, frame)
+                    self.store.replace_partition(spec, partition, frame, run_id)
+                except Exception as exc:
+                    self.store.mark_run_failed(run_id, exc)
+                    if self.progress:
+                        self.progress.partition_failed(spec.id, partition.id, exc)
+                    raise SyncError(f"同步 {spec.id} 分区 {partition.id} 失败：{exc}") from exc
+                result = PartitionResult(spec.id, partition.id, "SUCCESS", len(frame))
+                results.append(result)
+                if self.progress:
+                    self.progress.partition_finished(result)
+        finally:
+            if self.progress:
+                self.progress.dataset_finished(spec.id)
 
         return SyncReport(spec.id, tuple(results))
 

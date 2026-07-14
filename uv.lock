@@ -459,6 +459,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "pandas" },
     { name = "python-dotenv" },
+    { name = "tqdm" },
     { name = "tushare" },
     { name = "typer" },
 ]
@@ -474,6 +475,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.0" },
     { name = "pandas", specifier = ">=2.2.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "tqdm", specifier = ">=4.67.0" },
     { name = "tushare", specifier = ">=1.4.24" },
     { name = "typer", specifier = ">=0.16.0" },
 ]

@@ -8,6 +8,7 @@ dependencies = [
     "duckdb>=1.4.0",
     "pandas>=2.2.0",
     "python-dotenv>=1.0.1",
+    "tqdm>=4.67.0",
     "tushare>=1.4.24",
     "typer>=0.16.0",
 ]

@@ -72,10 +72,36 @@ class FakeProvider:
         return daily_frame(str(partition.request_params["trade_date"]), self.daily_close)
 
 
+class RecordingProgress:
+    def __init__(self):
+        self.events = []
+
+    def dataset_started(self, dataset_id, total):
+        self.events.append(("dataset_started", dataset_id, total))
+
+    def partition_started(self, dataset_id, partition_id):
+        self.events.append(("partition_started", dataset_id, partition_id))
+
+    def partition_finished(self, result):
+        self.events.append(("partition_finished", result.dataset_id, result.status))
+
+    def partition_failed(self, dataset_id, partition_id, error):
+        self.events.append(("partition_failed", dataset_id, partition_id, type(error).__name__))
+
+    def dataset_finished(self, dataset_id):
+        self.events.append(("dataset_finished", dataset_id))
+
+
 def test_daily_sync_automatically_prepares_dependencies(tmp_path):
     provider = FakeProvider()
+    progress = RecordingProgress()
     with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
-        report = db.sync("tushare.daily", start="2024-01-01", end="2024-01-03")
+        report = db.sync(
+            "tushare.daily",
+            start="2024-01-01",
+            end="2024-01-03",
+            progress=progress,
+        )
 
         assert report.completed == 2
         assert provider.calls == {
@@ -84,6 +110,16 @@ def test_daily_sync_automatically_prepares_dependencies(tmp_path):
             "tushare.daily": 2,
         }
         assert db.sql("SELECT count(*) FROM tushare.daily").fetchone()[0] == 2
+        assert [event for event in progress.events if event[0] == "dataset_started"] == [
+            ("dataset_started", "tushare.stock_basic", 1),
+            ("dataset_started", "tushare.trade_cal", 1),
+            ("dataset_started", "tushare.daily", 2),
+        ]
+        assert [event for event in progress.events if event[0] == "dataset_finished"] == [
+            ("dataset_finished", "tushare.stock_basic"),
+            ("dataset_finished", "tushare.trade_cal"),
+            ("dataset_finished", "tushare.daily"),
+        ]
 
 
 def test_failed_refresh_keeps_previous_partition(tmp_path):

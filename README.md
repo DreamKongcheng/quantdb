@@ -58,6 +58,16 @@ uv run quantdb status
 uv run quantdb sql "SELECT count(*) FROM tushare.daily"
 ```
 
+同步命令默认显示每个数据集的分区进度、当前分区、成功和跳过数量、数据行数、
+处理速度及预计剩余时间。脚本或非交互环境中可以使用 `--no-progress` 关闭：
+
+```bash
+uv run quantdb sync tushare.daily \
+  --start 2016-01-01 \
+  --end 2026-07-13 \
+  --no-progress
+```
+
 数据库路径的优先级为 `--db`、系统环境变量 `QUANTDB_PATH`、`.env` 中的
 `QUANTDB_PATH`、当前目录的 `quantdb.duckdb`。路径中的 `~` 会自动展开。
 

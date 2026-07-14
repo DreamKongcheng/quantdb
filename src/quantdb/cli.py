@@ -5,7 +5,7 @@ from typing import Annotated
 
 import typer
 
-from quantdb import QuantDB
+from quantdb import QuantDB, TqdmSyncProgress
 from quantdb.errors import QuantDBError
 
 app = typer.Typer(no_args_is_help=True, help="本地 Tushare + DuckDB 量化数据库")
@@ -34,10 +34,21 @@ def sync(
     start: Annotated[str | None, typer.Option(help="开始日期 YYYY-MM-DD")] = None,
     end: Annotated[str | None, typer.Option(help="结束日期 YYYY-MM-DD")] = None,
     refresh: Annotated[bool, typer.Option(help="重新获取并替换已有分区")] = False,
+    show_progress: Annotated[
+        bool,
+        typer.Option("--progress/--no-progress", help="显示同步进度、速度和预计剩余时间"),
+    ] = True,
 ) -> None:
     try:
         with QuantDB(db) as database:
-            report = database.sync(dataset, start=start, end=end, refresh=refresh)
+            progress = TqdmSyncProgress() if show_progress else None
+            report = database.sync(
+                dataset,
+                start=start,
+                end=end,
+                refresh=refresh,
+                progress=progress,
+            )
     except (QuantDBError, ValueError) as exc:
         _exit_with_error("同步失败", exc)
     typer.echo(f"{report.dataset_id}: 成功 {report.completed} 个分区，跳过 {report.skipped} 个分区")
