@@ -1,5 +1,6 @@
 from datetime import date
 
+import duckdb
 import pytest
 
 from quantdb import QuantDB
@@ -218,7 +219,8 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
         db.sql(
             """
             INSERT INTO tushare.suspend_d VALUES
-                ('000002.SZ', DATE '2024-02-01', NULL, 'S')
+                ('000002.SZ', DATE '2024-02-01', NULL, 'S'),
+                ('000002.SZ', DATE '2024-02-01', NULL, 'R')
             """
         )
 
@@ -242,7 +244,8 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
         assert db.sql(
             """
             SELECT
-                ts_code, is_suspended, open_at_up_limit, locked_up_limit,
+                ts_code, suspend_type, is_suspended, is_resumed,
+                open_at_up_limit, locked_up_limit,
                 can_buy_at_open, can_sell_at_open
             FROM market.trade_constraints_daily
             WHERE trade_date = DATE '2024-02-01'
@@ -250,8 +253,8 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
             ORDER BY ts_code
             """
         ).fetchall() == [
-            ("000001.SZ", False, True, True, False, True),
-            ("000002.SZ", True, None, None, False, False),
+            ("000001.SZ", None, False, False, True, True, False, True),
+            ("000002.SZ", "S,R", True, True, None, None, False, False),
         ]
         assert db.sql(
             """
@@ -439,8 +442,65 @@ def test_market_schema_initialization_is_idempotent(tmp_path):
             (4,),
             (5,),
             (6,),
+            (7,),
         ]
         assert db.bars("000001.SZ", adjust="qfq").count("*").fetchone() == (2,)
+
+
+def test_reopening_migrates_legacy_suspend_table_without_losing_events(tmp_path):
+    path = tmp_path / "quantdb.duckdb"
+    with QuantDB(path):
+        pass
+
+    with duckdb.connect(str(path)) as connection:
+        connection.execute("DROP TABLE tushare.suspend_d")
+        connection.execute(
+            """
+            CREATE TABLE tushare.suspend_d (
+                ts_code VARCHAR,
+                trade_date DATE,
+                suspend_timing VARCHAR,
+                suspend_type VARCHAR,
+                PRIMARY KEY (ts_code, trade_date)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tushare.suspend_d VALUES
+                ('600572.SH', DATE '2011-05-20', NULL, 'S')
+            """
+        )
+
+    with QuantDB(path) as db:
+        assert db.sql(
+            """
+            SELECT count(*)
+            FROM duckdb_constraints()
+            WHERE schema_name = 'tushare'
+              AND table_name = 'suspend_d'
+              AND constraint_type = 'PRIMARY KEY'
+            """
+        ).fetchone() == (0,)
+        assert db.sql("SELECT * FROM tushare.suspend_d").fetchall() == [
+            ("600572.SH", date(2011, 5, 20), None, "S")
+        ]
+        db.sql(
+            """
+            INSERT INTO tushare.suspend_d VALUES
+                ('600572.SH', DATE '2011-05-20', NULL, 'R')
+            """
+        )
+        assert db.sql(
+            """
+            SELECT suspend_type, is_suspended, is_resumed
+            FROM market.trade_constraints_daily
+            WHERE ts_code = '600572.SH' AND trade_date = DATE '2011-05-20'
+            """
+        ).fetchone() == ("S,R", True, True)
+
+    with QuantDB(path) as db:
+        assert db.sql("SELECT count(*) FROM tushare.suspend_d").fetchone() == (2,)
 
 
 def test_read_only_database_supports_research_queries_and_rejects_updates(tmp_path):

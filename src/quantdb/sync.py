@@ -214,12 +214,15 @@ def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame)
     if frame.empty:
         return
 
-    key_columns = list(spec.primary_key)
-    if frame[key_columns].isnull().any(axis=None):
-        raise DatasetValidationError(f"{spec.id} 主键包含空值")
-    duplicates = frame.duplicated(subset=key_columns, keep=False)
-    if duplicates.any():
-        raise DatasetValidationError(f"{spec.id} 返回重复主键，共 {int(duplicates.sum())} 行")
+    required_columns = list(dict.fromkeys((*spec.primary_key, *spec.required_columns)))
+    if required_columns and frame[required_columns].isnull().any(axis=None):
+        raise DatasetValidationError(f"{spec.id} 必填字段包含空值")
+
+    if spec.primary_key:
+        key_columns = list(spec.primary_key)
+        duplicates = frame.duplicated(subset=key_columns, keep=False)
+        if duplicates.any():
+            raise DatasetValidationError(f"{spec.id} 返回重复主键，共 {int(duplicates.sum())} 行")
 
     if spec.partition_strategy == "trading_day":
         expected = str(partition.request_params["trade_date"])

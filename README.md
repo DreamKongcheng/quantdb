@@ -241,6 +241,10 @@ FROM market.daily_bar_qfq_asof(DATE '2024-12-31');
 `market.stock_trade_constraints_asof()`；它们根据每条记录当日的上市和退市区间过滤，
 同时附带历史名称、ST 和退市整理标记，不读取当前名称、行业或当前上市状态。
 
+`tushare.suspend_d` 是事件表，同一证券日可以同时存在停牌 `S` 和复牌 `R` 记录。
+交易约束视图会先按证券日聚合，`suspend_type` 可能为 `S`、`R` 或 `S,R`，并分别通过
+`is_suspended`、`is_resumed` 暴露当日是否出现过对应事件。
+
 交易约束层提供 `open_at_up_limit`、`locked_up_limit`、`can_buy_at_open` 等辅助字段。
 `can_buy_at_open` 和 `can_sell_at_open` 只表达开盘成交口径；全天是否封板应使用
 `locked_up_limit`、`locked_down_limit`，精确的开板和排队成交仍需要分钟或盘口数据。

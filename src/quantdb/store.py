@@ -85,6 +85,7 @@ class DuckDBStore:
         )
         for spec in DATASETS.values():
             self.connection.execute(spec.create_table_sql)
+        self._migrate_suspend_d_event_table()
         self.connection.execute(
             """
             INSERT INTO meta.schema_version
@@ -97,6 +98,47 @@ class DuckDBStore:
         self._initialize_market_schema()
         self._initialize_market_metrics_schema()
         self._initialize_market_reference_schema()
+
+    def _migrate_suspend_d_event_table(self) -> None:
+        has_primary_key = self.connection.execute(
+            """
+            SELECT count(*) > 0
+            FROM duckdb_constraints()
+            WHERE schema_name = 'tushare'
+              AND table_name = 'suspend_d'
+              AND constraint_type = 'PRIMARY KEY'
+            """
+        ).fetchone()[0]
+        if not has_primary_key:
+            return
+
+        self.connection.execute("BEGIN TRANSACTION")
+        try:
+            self.connection.execute("DROP TABLE IF EXISTS tushare._suspend_d_events")
+            self.connection.execute(
+                """
+                CREATE TABLE tushare._suspend_d_events (
+                    ts_code VARCHAR NOT NULL,
+                    trade_date DATE NOT NULL,
+                    suspend_timing VARCHAR,
+                    suspend_type VARCHAR NOT NULL
+                )
+                """
+            )
+            self.connection.execute(
+                """
+                INSERT INTO tushare._suspend_d_events
+                SELECT ts_code, trade_date, suspend_timing, suspend_type
+                FROM tushare.suspend_d
+                """
+            )
+            self.connection.execute("DROP TABLE tushare.suspend_d")
+            self.connection.execute("ALTER TABLE tushare._suspend_d_events RENAME TO suspend_d")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            with suppress(duckdb.Error):
+                self.connection.execute("ROLLBACK")
+            raise
 
     def _initialize_market_schema(self) -> None:
         self.connection.execute("CREATE SCHEMA IF NOT EXISTS market")
@@ -368,6 +410,26 @@ class DuckDBStore:
         self.connection.execute(
             """
             CREATE OR REPLACE VIEW market.trade_constraints_daily AS
+            WITH suspension_daily AS (
+                SELECT
+                    ts_code,
+                    trade_date,
+                    string_agg(
+                        DISTINCT suspend_timing,
+                        ';' ORDER BY suspend_timing
+                    ) AS suspend_timing,
+                    CASE
+                        WHEN bool_or(suspend_type = 'S')
+                         AND bool_or(suspend_type = 'R') THEN 'S,R'
+                        WHEN bool_or(suspend_type = 'S') THEN 'S'
+                        WHEN bool_or(suspend_type = 'R') THEN 'R'
+                        ELSE NULL
+                    END AS suspend_type,
+                    coalesce(bool_or(suspend_type = 'S'), false) AS is_suspended,
+                    coalesce(bool_or(suspend_type = 'R'), false) AS is_resumed
+                FROM tushare.suspend_d
+                GROUP BY ts_code, trade_date
+            )
             SELECT
                 coalesce(limits.ts_code, suspension.ts_code) AS ts_code,
                 coalesce(limits.trade_date, suspension.trade_date) AS trade_date,
@@ -376,8 +438,8 @@ class DuckDBStore:
                 limits.down_limit,
                 suspension.suspend_timing,
                 suspension.suspend_type,
-                coalesce(suspension.suspend_type = 'S', false) AS is_suspended,
-                coalesce(suspension.suspend_type = 'R', false) AS is_resumed,
+                coalesce(suspension.is_suspended, false) AS is_suspended,
+                coalesce(suspension.is_resumed, false) AS is_resumed,
                 bars.open,
                 bars.high,
                 bars.low,
@@ -399,17 +461,17 @@ class DuckDBStore:
                     ELSE bars.high <= limits.down_limit
                 END AS locked_down_limit,
                 CASE
-                    WHEN suspension.suspend_type = 'S' THEN false
+                    WHEN suspension.is_suspended THEN false
                     WHEN bars.open IS NULL OR limits.up_limit IS NULL THEN NULL
                     ELSE bars.open < limits.up_limit
                 END AS can_buy_at_open,
                 CASE
-                    WHEN suspension.suspend_type = 'S' THEN false
+                    WHEN suspension.is_suspended THEN false
                     WHEN bars.open IS NULL OR limits.down_limit IS NULL THEN NULL
                     ELSE bars.open > limits.down_limit
                 END AS can_sell_at_open
             FROM tushare.stk_limit AS limits
-            FULL OUTER JOIN tushare.suspend_d AS suspension
+            FULL OUTER JOIN suspension_daily AS suspension
                 USING (ts_code, trade_date)
             LEFT JOIN tushare.daily AS bars
                 ON bars.ts_code = coalesce(limits.ts_code, suspension.ts_code)
@@ -513,6 +575,15 @@ class DuckDBStore:
             SELECT 6, '增加点时点股票交易约束视图', current_timestamp
             WHERE NOT EXISTS (
                 SELECT 1 FROM meta.schema_version WHERE version = 6
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 7, '支持同一证券日多条停复牌事件', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 7
             )
             """
         )

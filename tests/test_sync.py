@@ -97,10 +97,6 @@ def namechange_frame() -> pd.DataFrame:
     )
 
 
-def suspend_frame() -> pd.DataFrame:
-    return pd.DataFrame(columns=["ts_code", "trade_date", "suspend_timing", "suspend_type"])
-
-
 def stk_limit_frame(day: str) -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -128,6 +124,7 @@ class FakeProvider:
     def __init__(self):
         self.calls = Counter()
         self.daily_close: object = 10.5
+        self.suspend_events: list[dict[str, object]] = []
         self.fail_daily = False
         self.interrupt_daily = False
         self.interrupt_query_daily = False
@@ -153,7 +150,10 @@ class FakeProvider:
         if spec.id == "tushare.daily_basic":
             return daily_basic_frame(str(partition.request_params["trade_date"]))
         if spec.id == "tushare.suspend_d":
-            return suspend_frame()
+            return pd.DataFrame(
+                self.suspend_events,
+                columns=["ts_code", "trade_date", "suspend_timing", "suspend_type"],
+            )
         if spec.id == "tushare.stk_limit":
             return stk_limit_frame(str(partition.request_params["trade_date"]))
         if spec.id == "tushare.index_weight":
@@ -252,6 +252,7 @@ def test_adj_factor_and_daily_basic_reuse_trading_day_sync(tmp_path):
             (4,),
             (5,),
             (6,),
+            (7,),
         ]
 
 
@@ -328,6 +329,38 @@ def test_suspend_d_commits_empty_trading_day_partitions(tmp_path):
         assert db.health(start="2024-01-01", end="2024-01-03").filter(
             "dataset_id = 'tushare.suspend_d'"
         ).project("status, expected_days, available_days").fetchone() == ("HEALTHY", 2, 2)
+
+
+def test_suspend_d_preserves_same_day_suspend_and_resume_events(tmp_path):
+    provider = FakeProvider()
+    provider.suspend_events = [
+        {
+            "ts_code": "600572.SH",
+            "trade_date": "20110102",
+            "suspend_timing": None,
+            "suspend_type": "S",
+        },
+        {
+            "ts_code": "600572.SH",
+            "trade_date": "20110102",
+            "suspend_timing": None,
+            "suspend_type": "R",
+        },
+    ]
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        report = db.sync("tushare.suspend_d", start="2011-01-02")
+
+        assert report.completed == 1
+        assert db.sql(
+            "SELECT suspend_type FROM tushare.suspend_d ORDER BY suspend_type"
+        ).fetchall() == [("R",), ("S",)]
+        assert db.sql(
+            """
+            SELECT suspend_type, is_suspended, is_resumed
+            FROM market.trade_constraints_daily
+            WHERE ts_code = '600572.SH' AND trade_date = DATE '2011-01-02'
+            """
+        ).fetchone() == ("S,R", True, True)
 
 
 def test_index_weight_syncs_each_index_for_complete_months_only(tmp_path):

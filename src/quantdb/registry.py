@@ -47,6 +47,7 @@ class DatasetSpec:
     columns: tuple[ColumnSpec, ...]
     primary_key: tuple[str, ...]
     partition_strategy: PartitionStrategy
+    required_columns: tuple[str, ...] = ()
     allow_empty: bool = False
     dependencies: tuple[str, ...] = ()
     request_variants: tuple[Mapping[str, str], ...] = field(default_factory=lambda: ({},))
@@ -59,16 +60,17 @@ class DatasetSpec:
 
     @property
     def create_table_sql(self) -> str:
-        column_sql = ",\n    ".join(
-            f"{quote_identifier(column.name)} {column.duckdb_type}" for column in self.columns
-        )
-        primary_key_sql = ", ".join(quote_identifier(name) for name in self.primary_key)
-        return (
-            f"CREATE TABLE IF NOT EXISTS {self.table} (\n"
-            f"    {column_sql},\n"
-            f"    PRIMARY KEY ({primary_key_sql})\n"
-            ")"
-        )
+        required_columns = set(self.primary_key) | set(self.required_columns)
+        definitions = [
+            f"{quote_identifier(column.name)} {column.duckdb_type}"
+            + (" NOT NULL" if column.name in required_columns else "")
+            for column in self.columns
+        ]
+        if self.primary_key:
+            primary_key_sql = ", ".join(quote_identifier(name) for name in self.primary_key)
+            definitions.append(f"PRIMARY KEY ({primary_key_sql})")
+        definition_sql = ",\n    ".join(definitions)
+        return f"CREATE TABLE IF NOT EXISTS {self.table} (\n    {definition_sql}\n)"
 
 
 def column(name: str, duckdb_type: str, date_format: str | None = None) -> ColumnSpec:
@@ -216,11 +218,14 @@ SUSPEND_D = DatasetSpec(
         column("suspend_timing", "VARCHAR"),
         column("suspend_type", "VARCHAR"),
     ),
-    primary_key=("ts_code", "trade_date"),
+    # 同一证券日可能同时有 S/R 两类事件，且 suspend_timing 可以为空，因此没有可靠自然键。
+    primary_key=(),
     partition_strategy="trading_day",
+    required_columns=("ts_code", "trade_date", "suspend_type"),
     allow_empty=True,
     dependencies=(TRADE_CAL.id,),
     requests_per_minute=180,
+    deduplicate_exact_rows=True,
 )
 
 STK_LIMIT = DatasetSpec(
