@@ -153,7 +153,10 @@ class TushareProvider:
             )
         if not frames:
             return pd.DataFrame(columns=list(spec.source_fields))
-        return pd.concat(frames, ignore_index=True)
+        result = pd.concat(frames, ignore_index=True)
+        if spec.deduplicate_exact_rows:
+            result = result.drop_duplicates(subset=list(spec.source_fields), ignore_index=True)
+        return result
 
 
 def _is_rate_limit_error(error: Exception) -> bool:

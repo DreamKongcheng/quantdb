@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -7,7 +8,9 @@ from typing import Literal
 
 from quantdb.errors import DatasetNotFoundError
 
-PartitionStrategy = Literal["full", "calendar_year", "trading_day"]
+PartitionStrategy = Literal["full", "calendar_year", "trading_day", "index_month"]
+
+INDEX_WEIGHT_CODES = ("000300.SH", "000905.SH", "000985.CSI")
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ class DatasetSpec:
     dependencies: tuple[str, ...] = ()
     request_variants: tuple[Mapping[str, str], ...] = field(default_factory=lambda: ({},))
     requests_per_minute: int | None = None
+    deduplicate_exact_rows: bool = False
 
     @property
     def source_fields(self) -> tuple[str, ...]:
@@ -101,6 +105,24 @@ STOCK_BASIC = DatasetSpec(
         {"list_status": "D"},
         {"list_status": "P"},
     ),
+)
+
+NAMECHANGE = DatasetSpec(
+    id="tushare.namechange",
+    endpoint="namechange",
+    table="tushare.namechange",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("name", "VARCHAR"),
+        column("start_date", "DATE", "%Y%m%d"),
+        column("end_date", "DATE", "%Y%m%d"),
+        column("ann_date", "DATE", "%Y%m%d"),
+        column("change_reason", "VARCHAR"),
+    ),
+    primary_key=("ts_code", "start_date"),
+    partition_strategy="full",
+    requests_per_minute=180,
+    deduplicate_exact_rows=True,
 )
 
 TRADE_CAL = DatasetSpec(
@@ -184,8 +206,69 @@ DAILY_BASIC = DatasetSpec(
     requests_per_minute=180,
 )
 
+SUSPEND_D = DatasetSpec(
+    id="tushare.suspend_d",
+    endpoint="suspend_d",
+    table="tushare.suspend_d",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("suspend_timing", "VARCHAR"),
+        column("suspend_type", "VARCHAR"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    partition_strategy="trading_day",
+    allow_empty=True,
+    dependencies=(TRADE_CAL.id,),
+    requests_per_minute=180,
+)
+
+STK_LIMIT = DatasetSpec(
+    id="tushare.stk_limit",
+    endpoint="stk_limit",
+    table="tushare.stk_limit",
+    columns=(
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("ts_code", "VARCHAR"),
+        column("pre_close", "DOUBLE"),
+        column("up_limit", "DOUBLE"),
+        column("down_limit", "DOUBLE"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    partition_strategy="trading_day",
+    dependencies=(TRADE_CAL.id,),
+    requests_per_minute=180,
+)
+
+INDEX_WEIGHT = DatasetSpec(
+    id="tushare.index_weight",
+    endpoint="index_weight",
+    table="tushare.index_weight",
+    columns=(
+        column("index_code", "VARCHAR"),
+        column("con_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("weight", "DOUBLE"),
+    ),
+    primary_key=("index_code", "con_code", "trade_date"),
+    partition_strategy="index_month",
+    allow_empty=True,
+    requests_per_minute=180,
+)
+
 DATASETS: dict[str, DatasetSpec] = {
-    spec.id: spec for spec in (STOCK_BASIC, TRADE_CAL, DAILY, ADJ_FACTOR, DAILY_BASIC)
+    spec.id: spec
+    for spec in (
+        STOCK_BASIC,
+        NAMECHANGE,
+        TRADE_CAL,
+        DAILY,
+        ADJ_FACTOR,
+        DAILY_BASIC,
+        SUSPEND_D,
+        STK_LIMIT,
+        INDEX_WEIGHT,
+    )
 }
 
 
@@ -255,6 +338,51 @@ def daily_partition(trade_date: date) -> Partition:
         delete_where='"trade_date" = ?',
         delete_params=(trade_date,),
     )
+
+
+def index_month_partitions(
+    start: str | date | datetime | None,
+    end: str | date | datetime | None,
+    *,
+    index_codes: tuple[str, ...] = INDEX_WEIGHT_CODES,
+) -> list[Partition]:
+    if start is None:
+        raise ValueError("同步 tushare.index_weight 必须提供 start")
+    start_date = parse_date(start)
+    end_date = parse_date(end) if end is not None else start_date
+    if start_date > end_date:
+        raise ValueError("start 不能晚于 end")
+
+    month_start = date(start_date.year, start_date.month, 1)
+    partitions: list[Partition] = []
+    while month_start <= end_date:
+        month_end = date(
+            month_start.year,
+            month_start.month,
+            monthrange(month_start.year, month_start.month)[1],
+        )
+        # 月度权重只提交完整月份，避免月中空结果被永久视为已同步。
+        if month_end > end_date:
+            break
+        for index_code in index_codes:
+            partitions.append(
+                Partition(
+                    id=f"index_code={index_code}/month={month_start:%Y-%m}",
+                    values={"index_code": index_code, "month": f"{month_start:%Y-%m}"},
+                    request_params={
+                        "index_code": index_code,
+                        "start_date": month_start.strftime("%Y%m%d"),
+                        "end_date": month_end.strftime("%Y%m%d"),
+                    },
+                    delete_where=('"index_code" = ? AND "trade_date" BETWEEN ? AND ?'),
+                    delete_params=(index_code, month_start, month_end),
+                )
+            )
+        if month_start.month == 12:
+            month_start = date(month_start.year + 1, 1, 1)
+        else:
+            month_start = date(month_start.year, month_start.month + 1, 1)
+    return partitions
 
 
 def quote_identifier(value: str) -> str:

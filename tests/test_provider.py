@@ -3,7 +3,7 @@ import pytest
 
 from quantdb.errors import FetchError
 from quantdb.provider import TushareClient, TushareProvider
-from quantdb.registry import STOCK_BASIC, full_partition
+from quantdb.registry import NAMECHANGE, STOCK_BASIC, full_partition
 
 
 class PaginatedAPI:
@@ -50,6 +50,21 @@ class StockBasicAPI:
             delist_date=None,
         )
         return pd.DataFrame([row], columns=fields)
+
+
+class DuplicateNamechangeAPI:
+    def query(self, endpoint, **params):
+        assert endpoint == "namechange"
+        fields = params["fields"].split(",")
+        row = {
+            "ts_code": "600788.SH",
+            "name": "ST达尔曼",
+            "start_date": "20040510",
+            "end_date": "20041101",
+            "ann_date": "20040430",
+            "change_reason": "ST",
+        }
+        return pd.DataFrame([row, row], columns=fields)
 
 
 class FakeClock:
@@ -108,6 +123,23 @@ def test_stock_basic_fetches_all_statuses_before_returning():
 
     assert api.statuses == ["L", "D", "P"]
     assert result["list_status"].tolist() == ["L", "D", "P"]
+
+
+def test_namechange_deduplicates_exact_upstream_rows():
+    provider = TushareProvider(TushareClient(api=DuplicateNamechangeAPI(), retry_attempts=1))
+
+    result = provider.fetch(NAMECHANGE, full_partition())
+
+    assert result.to_dict("records") == [
+        {
+            "ts_code": "600788.SH",
+            "name": "ST达尔曼",
+            "start_date": "20040510",
+            "end_date": "20041101",
+            "ann_date": "20040430",
+            "change_reason": "ST",
+        }
+    ]
 
 
 def test_query_all_throttles_every_request_for_an_endpoint():

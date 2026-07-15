@@ -158,6 +158,141 @@ def test_daily_metrics_and_panel_join_metrics_onto_raw_bars(tmp_path):
         ).fetchone() == (7.0, None)
 
 
+def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
+    with QuantDB(tmp_path / "quantdb.duckdb") as db:
+        db.sql(
+            """
+            INSERT INTO tushare.stock_basic (
+                ts_code, symbol, name, list_status, list_date, delist_date
+            ) VALUES
+                ('000001.SZ', '000001', '平安银行', 'L', DATE '1991-04-03', NULL),
+                ('000002.SZ', '000002', '万科A', 'L', DATE '1991-01-29', NULL),
+                (
+                    '000003.SZ', '000003', '退市样本', 'D',
+                    DATE '2010-01-01', DATE '2024-02-01'
+                ),
+                ('000004.SZ', '000004', '待上市样本', 'P', DATE '2024-03-01', NULL)
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.namechange VALUES
+                (
+                    '000001.SZ', 'ST平安', DATE '2020-01-01', DATE '2020-12-31',
+                    DATE '2019-12-20', 'ST'
+                ),
+                (
+                    '000001.SZ', '平安银行', DATE '2021-01-01', NULL,
+                    DATE '2020-12-20', '撤销ST'
+                )
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.index_weight VALUES
+                ('000300.SH', '000001.SZ', DATE '2024-01-31', 1.0),
+                ('000300.SH', '000002.SZ', DATE '2024-01-31', 2.0),
+                ('000300.SH', '000001.SZ', DATE '2024-02-29', 1.5)
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.daily VALUES
+                (
+                    '000001.SZ', DATE '2024-02-01',
+                    11.0, 11.0, 11.0, 11.0, 10.0, 1.0, 10.0, 100.0, 1100.0
+                )
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.stk_limit VALUES
+                (DATE '2020-06-01', '000001.SZ', 10.0, 11.0, 9.0),
+                (DATE '2024-01-31', '000003.SZ', 10.0, 11.0, 9.0),
+                (DATE '2024-02-01', '000001.SZ', 10.0, 11.0, 9.0),
+                (DATE '2024-02-01', '000003.SZ', 10.0, 11.0, 9.0),
+                (DATE '2024-02-01', '000004.SZ', 10.0, 11.0, 9.0),
+                (DATE '2024-02-01', '159001.SZ', 1.0, 1.1, 0.9)
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.suspend_d VALUES
+                ('000002.SZ', DATE '2024-02-01', NULL, 'S')
+            """
+        )
+
+        assert db.sql(
+            """
+            SELECT historical_name, is_st, is_delisting, is_listed
+            FROM market.security_status_asof(DATE '2020-06-01')
+            WHERE ts_code = '000001.SZ'
+            """
+        ).fetchone() == ("ST平安", True, False, True)
+        assert db.sql(
+            """
+            SELECT con_code, snapshot_date, weight
+            FROM market.index_members_asof('000300.SH', DATE '2024-02-15')
+            ORDER BY con_code
+            """
+        ).fetchall() == [
+            ("000001.SZ", date(2024, 1, 31), 1.0),
+            ("000002.SZ", date(2024, 1, 31), 2.0),
+        ]
+        assert db.sql(
+            """
+            SELECT
+                ts_code, is_suspended, open_at_up_limit, locked_up_limit,
+                can_buy_at_open, can_sell_at_open
+            FROM market.trade_constraints_daily
+            WHERE trade_date = DATE '2024-02-01'
+              AND ts_code IN ('000001.SZ', '000002.SZ')
+            ORDER BY ts_code
+            """
+        ).fetchall() == [
+            ("000001.SZ", False, True, True, False, True),
+            ("000002.SZ", True, None, None, False, False),
+        ]
+        assert db.sql(
+            """
+            SELECT ts_code
+            FROM market.trade_constraints_daily
+            WHERE trade_date = DATE '2024-02-01'
+            ORDER BY ts_code
+            """
+        ).fetchall() == [
+            ("000001.SZ",),
+            ("000002.SZ",),
+            ("000003.SZ",),
+            ("000004.SZ",),
+            ("159001.SZ",),
+        ]
+        assert db.sql(
+            """
+            SELECT ts_code, has_name_history, is_suspended
+            FROM market.stock_trade_constraints_asof(DATE '2024-02-01')
+            ORDER BY ts_code
+            """
+        ).fetchall() == [
+            ("000001.SZ", True, False),
+            ("000002.SZ", False, True),
+        ]
+        assert db.sql(
+            """
+            SELECT ts_code, historical_name, is_st, is_delisting
+            FROM market.stock_trade_constraints_asof(DATE '2020-06-01')
+            """
+        ).fetchone() == ("000001.SZ", "ST平安", True, False)
+        assert db.sql(
+            """
+            SELECT ts_code
+            FROM market.stock_trade_constraints_daily
+            WHERE ts_code = '000003.SZ'
+            ORDER BY trade_date
+            """
+        ).fetchall() == [("000003.SZ",)]
+
+
 def test_health_reports_missing_dates_and_security_rows(tmp_path):
     with QuantDB(tmp_path / "quantdb.duckdb") as db:
         seed_bars(db)
@@ -182,10 +317,14 @@ def test_health_reports_missing_dates_and_security_rows(tmp_path):
         )
         assert health.fetchall() == [
             ("tushare.stock_basic", "EMPTY", None, None, 0, None, 0),
+            ("tushare.namechange", "EMPTY", None, None, 0, None, 0),
             ("tushare.trade_cal", "HEALTHY", 2, 2, 0, None, 2),
             ("tushare.daily", "HEALTHY", 2, 2, 0, None, 3),
             ("tushare.adj_factor", "INCOMPLETE", 2, 2, 0, 1, 2),
             ("tushare.daily_basic", "HEALTHY", 2, 2, 0, 1, 2),
+            ("tushare.suspend_d", "INCOMPLETE", 2, 0, 2, None, 0),
+            ("tushare.stk_limit", "INCOMPLETE", 2, 0, 2, None, 0),
+            ("tushare.index_weight", "EMPTY", None, None, 0, None, 0),
         ]
 
 
@@ -266,6 +405,8 @@ def test_market_schema_initialization_is_idempotent(tmp_path):
             (2,),
             (3,),
             (4,),
+            (5,),
+            (6,),
         ]
         assert db.bars("000001.SZ", adjust="qfq").count("*").fetchone() == (2,)
 

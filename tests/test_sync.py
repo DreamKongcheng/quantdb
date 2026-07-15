@@ -84,6 +84,46 @@ def daily_basic_frame(day: str) -> pd.DataFrame:
     )
 
 
+def namechange_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["平安银行"],
+            "start_date": ["20120802"],
+            "end_date": [None],
+            "ann_date": ["20120120"],
+            "change_reason": ["其他"],
+        }
+    )
+
+
+def suspend_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["ts_code", "trade_date", "suspend_timing", "suspend_type"])
+
+
+def stk_limit_frame(day: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "trade_date": [day],
+            "ts_code": ["000001.SZ"],
+            "pre_close": [10.0],
+            "up_limit": [11.0],
+            "down_limit": [9.0],
+        }
+    )
+
+
+def index_weight_frame(index_code: str, day: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "index_code": [index_code],
+            "con_code": ["000001.SZ"],
+            "trade_date": [day],
+            "weight": [1.25],
+        }
+    )
+
+
 class FakeProvider:
     def __init__(self):
         self.calls = Counter()
@@ -96,6 +136,8 @@ class FakeProvider:
         self.calls[spec.id] += 1
         if spec.id == "tushare.stock_basic":
             return pd.DataFrame(STOCK_COLUMNS)
+        if spec.id == "tushare.namechange":
+            return namechange_frame()
         if spec.id == "tushare.trade_cal":
             year = partition.values["year"]
             return pd.DataFrame(
@@ -110,6 +152,15 @@ class FakeProvider:
             return adj_factor_frame(str(partition.request_params["trade_date"]))
         if spec.id == "tushare.daily_basic":
             return daily_basic_frame(str(partition.request_params["trade_date"]))
+        if spec.id == "tushare.suspend_d":
+            return suspend_frame()
+        if spec.id == "tushare.stk_limit":
+            return stk_limit_frame(str(partition.request_params["trade_date"]))
+        if spec.id == "tushare.index_weight":
+            return index_weight_frame(
+                str(partition.request_params["index_code"]),
+                str(partition.request_params["end_date"]),
+            )
         if self.fail_daily:
             raise ConnectionError("network interrupted")
         if self.interrupt_daily:
@@ -199,6 +250,8 @@ def test_adj_factor_and_daily_basic_reuse_trading_day_sync(tmp_path):
             (2,),
             (3,),
             (4,),
+            (5,),
+            (6,),
         ]
 
 
@@ -209,40 +262,91 @@ def test_update_refreshes_stock_and_fills_all_missing_daily_datasets(tmp_path):
 
         assert [report.dataset_id for report in reports] == [
             "tushare.stock_basic",
+            "tushare.namechange",
             "tushare.trade_cal",
             "tushare.daily",
             "tushare.adj_factor",
             "tushare.daily_basic",
+            "tushare.suspend_d",
+            "tushare.stk_limit",
+            "tushare.index_weight",
         ]
         assert provider.calls == {
             "tushare.stock_basic": 1,
+            "tushare.namechange": 1,
             "tushare.trade_cal": 1,
             "tushare.daily": 2,
             "tushare.adj_factor": 2,
             "tushare.daily_basic": 2,
+            "tushare.suspend_d": 2,
+            "tushare.stk_limit": 2,
         }
         assert db.health(start="2024-01-01", end="2024-01-03").project(
             "dataset_id, status"
         ).fetchall() == [
             ("tushare.stock_basic", "HEALTHY"),
+            ("tushare.namechange", "HEALTHY"),
             ("tushare.trade_cal", "HEALTHY"),
             ("tushare.daily", "HEALTHY"),
             ("tushare.adj_factor", "HEALTHY"),
             ("tushare.daily_basic", "HEALTHY"),
+            ("tushare.suspend_d", "HEALTHY"),
+            ("tushare.stk_limit", "HEALTHY"),
+            ("tushare.index_weight", "EMPTY"),
         ]
 
         second_reports = db.update(start="2024-01-01", end="2024-01-03")
 
         assert provider.calls == {
             "tushare.stock_basic": 2,
+            "tushare.namechange": 2,
             "tushare.trade_cal": 1,
             "tushare.daily": 2,
             "tushare.adj_factor": 2,
             "tushare.daily_basic": 2,
+            "tushare.suspend_d": 2,
+            "tushare.stk_limit": 2,
         }
         assert second_reports[0].completed == 1
-        assert second_reports[1].skipped == 1
-        assert [report.skipped for report in second_reports[2:]] == [2, 2, 2]
+        assert second_reports[1].completed == 1
+        assert second_reports[2].skipped == 1
+        assert [report.skipped for report in second_reports[3:8]] == [2, 2, 2, 2, 2]
+        assert second_reports[8].results == ()
+
+
+def test_suspend_d_commits_empty_trading_day_partitions(tmp_path):
+    provider = FakeProvider()
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        report = db.sync("tushare.suspend_d", start="2024-01-01", end="2024-01-03")
+
+        assert report.completed == 2
+        assert db.sql("SELECT count(*) FROM tushare.suspend_d").fetchone() == (0,)
+        assert db.sql(
+            "SELECT row_count FROM meta.partitions "
+            "WHERE dataset_id = 'tushare.suspend_d' ORDER BY partition_id"
+        ).fetchall() == [(0,), (0,)]
+        assert db.health(start="2024-01-01", end="2024-01-03").filter(
+            "dataset_id = 'tushare.suspend_d'"
+        ).project("status, expected_days, available_days").fetchone() == ("HEALTHY", 2, 2)
+
+
+def test_index_weight_syncs_each_index_for_complete_months_only(tmp_path):
+    provider = FakeProvider()
+    with QuantDB(tmp_path / "quantdb.duckdb", provider=provider) as db:
+        incomplete = db.sync("tushare.index_weight", start="2024-01-01", end="2024-01-30")
+        complete = db.sync("tushare.index_weight", start="2024-01-01", end="2024-01-31")
+
+        assert incomplete.results == ()
+        assert complete.completed == 3
+        assert provider.calls["tushare.index_weight"] == 3
+        assert db.sql(
+            "SELECT index_code, count(*) FROM tushare.index_weight "
+            "GROUP BY index_code ORDER BY index_code"
+        ).fetchall() == [
+            ("000300.SH", 1),
+            ("000905.SH", 1),
+            ("000985.CSI", 1),
+        ]
 
 
 def test_failed_refresh_keeps_previous_partition(tmp_path):

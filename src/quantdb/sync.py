@@ -21,6 +21,7 @@ from quantdb.registry import (
     daily_partition,
     full_partition,
     get_dataset,
+    index_month_partitions,
     parse_date,
 )
 from quantdb.store import DuckDBStore
@@ -103,6 +104,8 @@ class SyncEngine:
             partitions = calendar_year_partitions(start, end)
         elif spec.partition_strategy == "full":
             partitions = [full_partition()]
+        elif spec.partition_strategy == "index_month":
+            partitions = index_month_partitions(start, end)
         else:  # pragma: no cover - 注册表新增策略时的防御分支
             raise ValueError(f"数据集 {spec.id} 的分区策略尚未实现")
 
@@ -208,6 +211,8 @@ def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame)
         raise DatasetValidationError(f"{spec.id} 缺少字段：{names}")
     if frame.empty and not spec.allow_empty:
         raise DatasetValidationError(f"{spec.id} 分区 {partition.id} 返回空数据")
+    if frame.empty:
+        return
 
     key_columns = list(spec.primary_key)
     if frame[key_columns].isnull().any(axis=None):
@@ -229,4 +234,19 @@ def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame)
         if exchanges != {expected_exchange}:
             raise DatasetValidationError(
                 f"{spec.id} 返回了目标交易所之外的数据：{sorted(exchanges)}"
+            )
+    elif spec.partition_strategy == "index_month":
+        expected_code = str(partition.request_params["index_code"])
+        actual_codes = set(frame["index_code"].astype("string").str.strip().dropna())
+        if actual_codes != {expected_code}:
+            raise DatasetValidationError(
+                f"{spec.id} 返回了目标指数之外的数据：{sorted(actual_codes)}"
+            )
+        start_date = str(partition.request_params["start_date"])
+        end_date = str(partition.request_params["end_date"])
+        actual_dates = frame["trade_date"].astype("string").str.strip().dropna()
+        outside_range = actual_dates[(actual_dates < start_date) | (actual_dates > end_date)]
+        if not outside_range.empty:
+            raise DatasetValidationError(
+                f"{spec.id} 返回了目标月份之外的数据：{sorted(set(outside_range))}"
             )

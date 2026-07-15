@@ -155,6 +155,7 @@ class QuantDB:
 
         reports = [
             self.sync("tushare.stock_basic", refresh=True, progress=progress),
+            self.sync("tushare.namechange", refresh=True, progress=progress),
             self.sync(
                 "tushare.trade_cal",
                 start=start_date,
@@ -166,6 +167,8 @@ class QuantDB:
             "tushare.daily",
             "tushare.adj_factor",
             "tushare.daily_basic",
+            "tushare.suspend_d",
+            "tushare.stk_limit",
         ):
             reports.append(
                 self.sync(
@@ -175,6 +178,14 @@ class QuantDB:
                     progress=progress,
                 )
             )
+        reports.append(
+            self.sync(
+                "tushare.index_weight",
+                start=start_date,
+                end=end_date,
+                progress=progress,
+            )
+        )
         return tuple(reports)
 
     def health(

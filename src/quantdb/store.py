@@ -96,6 +96,7 @@ class DuckDBStore:
         )
         self._initialize_market_schema()
         self._initialize_market_metrics_schema()
+        self._initialize_market_reference_schema()
 
     def _initialize_market_schema(self) -> None:
         self.connection.execute("CREATE SCHEMA IF NOT EXISTS market")
@@ -283,6 +284,235 @@ class DuckDBStore:
             SELECT 4, '增加每日指标与标准行情面板', current_timestamp
             WHERE NOT EXISTS (
                 SELECT 1 FROM meta.schema_version WHERE version = 4
+            )
+            """
+        )
+
+    def _initialize_market_reference_schema(self) -> None:
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.security_name_history AS
+            SELECT
+                ts_code,
+                name,
+                start_date,
+                end_date,
+                ann_date,
+                change_reason,
+                contains(upper(name), 'ST') AS is_st,
+                contains(name, '退') AS is_delisting
+            FROM tushare.namechange
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO market.security_status_asof(as_of_date) AS TABLE (
+                WITH matching_name AS (
+                    SELECT
+                        history.*,
+                        row_number() OVER (
+                            PARTITION BY history.ts_code
+                            ORDER BY history.start_date DESC, history.ann_date DESC NULLS LAST
+                        ) AS match_rank
+                    FROM market.security_name_history AS history
+                    WHERE history.start_date <= as_of_date
+                      AND (history.end_date IS NULL OR history.end_date >= as_of_date)
+                )
+                SELECT
+                    security.ts_code,
+                    security.symbol,
+                    security.name AS current_name,
+                    matching_name.name AS historical_name,
+                    matching_name.start_date AS name_start_date,
+                    matching_name.end_date AS name_end_date,
+                    matching_name.ann_date AS name_ann_date,
+                    matching_name.change_reason,
+                    matching_name.name IS NOT NULL AS has_name_history,
+                    matching_name.is_st,
+                    matching_name.is_delisting,
+                    security.list_date,
+                    security.delist_date,
+                    security.list_date <= as_of_date
+                        AND (security.delist_date IS NULL OR as_of_date < security.delist_date)
+                        AS is_listed
+                FROM tushare.stock_basic AS security
+                LEFT JOIN matching_name
+                    ON matching_name.ts_code = security.ts_code
+                   AND matching_name.match_rank = 1
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO market.index_members_asof(
+                requested_index_code, as_of_date
+            ) AS TABLE (
+                WITH snapshot AS (
+                    SELECT max(trade_date) AS trade_date
+                    FROM tushare.index_weight
+                    WHERE index_code = requested_index_code
+                      AND trade_date <= as_of_date
+                )
+                SELECT
+                    weights.index_code,
+                    weights.con_code,
+                    weights.trade_date AS snapshot_date,
+                    weights.weight
+                FROM tushare.index_weight AS weights
+                CROSS JOIN snapshot
+                WHERE weights.index_code = requested_index_code
+                  AND weights.trade_date = snapshot.trade_date
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.trade_constraints_daily AS
+            SELECT
+                coalesce(limits.ts_code, suspension.ts_code) AS ts_code,
+                coalesce(limits.trade_date, suspension.trade_date) AS trade_date,
+                limits.pre_close,
+                limits.up_limit,
+                limits.down_limit,
+                suspension.suspend_timing,
+                suspension.suspend_type,
+                coalesce(suspension.suspend_type = 'S', false) AS is_suspended,
+                coalesce(suspension.suspend_type = 'R', false) AS is_resumed,
+                bars.open,
+                bars.high,
+                bars.low,
+                bars.close,
+                CASE
+                    WHEN bars.open IS NULL OR limits.up_limit IS NULL THEN NULL
+                    ELSE bars.open >= limits.up_limit
+                END AS open_at_up_limit,
+                CASE
+                    WHEN bars.open IS NULL OR limits.down_limit IS NULL THEN NULL
+                    ELSE bars.open <= limits.down_limit
+                END AS open_at_down_limit,
+                CASE
+                    WHEN bars.low IS NULL OR limits.up_limit IS NULL THEN NULL
+                    ELSE bars.low >= limits.up_limit
+                END AS locked_up_limit,
+                CASE
+                    WHEN bars.high IS NULL OR limits.down_limit IS NULL THEN NULL
+                    ELSE bars.high <= limits.down_limit
+                END AS locked_down_limit,
+                CASE
+                    WHEN suspension.suspend_type = 'S' THEN false
+                    WHEN bars.open IS NULL OR limits.up_limit IS NULL THEN NULL
+                    ELSE bars.open < limits.up_limit
+                END AS can_buy_at_open,
+                CASE
+                    WHEN suspension.suspend_type = 'S' THEN false
+                    WHEN bars.open IS NULL OR limits.down_limit IS NULL THEN NULL
+                    ELSE bars.open > limits.down_limit
+                END AS can_sell_at_open
+            FROM tushare.stk_limit AS limits
+            FULL OUTER JOIN tushare.suspend_d AS suspension
+                USING (ts_code, trade_date)
+            LEFT JOIN tushare.daily AS bars
+                ON bars.ts_code = coalesce(limits.ts_code, suspension.ts_code)
+               AND bars.trade_date = coalesce(limits.trade_date, suspension.trade_date)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW market.stock_trade_constraints_daily AS
+            WITH candidates AS (
+                SELECT
+                    constraints.*,
+                    security.symbol,
+                    security.list_date,
+                    security.delist_date,
+                    history.name AS historical_name,
+                    history.start_date AS name_start_date,
+                    history.end_date AS name_end_date,
+                    history.ann_date AS name_ann_date,
+                    history.change_reason,
+                    history.name IS NOT NULL AS has_name_history,
+                    history.is_st,
+                    history.is_delisting,
+                    row_number() OVER (
+                        PARTITION BY constraints.ts_code, constraints.trade_date
+                        ORDER BY history.start_date DESC NULLS LAST,
+                                 history.ann_date DESC NULLS LAST
+                    ) AS name_rank
+                FROM market.trade_constraints_daily AS constraints
+                JOIN tushare.stock_basic AS security
+                    ON security.ts_code = constraints.ts_code
+                   AND security.list_date <= constraints.trade_date
+                   AND (
+                       security.delist_date IS NULL
+                       OR constraints.trade_date < security.delist_date
+                   )
+                LEFT JOIN market.security_name_history AS history
+                    ON history.ts_code = constraints.ts_code
+                   AND history.start_date <= constraints.trade_date
+                   AND (
+                       history.end_date IS NULL
+                       OR history.end_date >= constraints.trade_date
+                   )
+            )
+            SELECT
+                ts_code,
+                trade_date,
+                symbol,
+                historical_name,
+                name_start_date,
+                name_end_date,
+                name_ann_date,
+                change_reason,
+                has_name_history,
+                is_st,
+                is_delisting,
+                list_date,
+                delist_date,
+                pre_close,
+                up_limit,
+                down_limit,
+                suspend_timing,
+                suspend_type,
+                is_suspended,
+                is_resumed,
+                open,
+                high,
+                low,
+                close,
+                open_at_up_limit,
+                open_at_down_limit,
+                locked_up_limit,
+                locked_down_limit,
+                can_buy_at_open,
+                can_sell_at_open
+            FROM candidates
+            WHERE name_rank = 1
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO market.stock_trade_constraints_asof(as_of_date) AS TABLE (
+                SELECT *
+                FROM market.stock_trade_constraints_daily
+                WHERE trade_date = as_of_date
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 5, '增加证券状态、停复牌、涨跌停和指数权重数据集', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 5
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 6, '增加点时点股票交易约束视图', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 6
             )
             """
         )
@@ -624,6 +854,23 @@ class DuckDBStore:
                 FROM tushare.daily_basic AS metrics, bounds
                 WHERE metrics.trade_date BETWEEN bounds.start_date AND bounds.end_date
             ),
+            ranged_suspension AS (
+                SELECT suspension.*
+                FROM tushare.suspend_d AS suspension, bounds
+                WHERE suspension.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            ranged_limits AS (
+                SELECT limits.*
+                FROM tushare.stk_limit AS limits, bounds
+                WHERE limits.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            suspend_partition_dates AS (
+                SELECT try_cast(partition_values ->> 'trade_date' AS DATE) AS trade_date
+                FROM meta.partitions, bounds
+                WHERE dataset_id = 'tushare.suspend_d'
+                  AND try_cast(partition_values ->> 'trade_date' AS DATE)
+                      BETWEEN bounds.start_date AND bounds.end_date
+            ),
             calendar_health AS (
                 SELECT
                     date_diff('day', start_date, end_date) + 1 AS expected_days,
@@ -640,6 +887,18 @@ class DuckDBStore:
                     NULL::DATE AS last_date,
                     NULL::BIGINT AS unmatched_daily_rows
                 FROM tushare.stock_basic
+
+                UNION ALL
+
+                SELECT
+                    'tushare.namechange',
+                    NULL::BIGINT,
+                    NULL::BIGINT,
+                    count(*)::BIGINT,
+                    min(start_date),
+                    max(coalesce(end_date, start_date)),
+                    NULL::BIGINT
+                FROM tushare.namechange
 
                 UNION ALL
 
@@ -729,6 +988,59 @@ class DuckDBStore:
                         )
                     )
                 FROM ranged_metrics
+
+                UNION ALL
+
+                SELECT
+                    'tushare.suspend_d',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_suspension AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        ) OR EXISTS (
+                            SELECT 1 FROM suspend_partition_dates AS partition
+                            WHERE partition.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM ranged_suspension
+
+                UNION ALL
+
+                SELECT
+                    'tushare.stk_limit',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_limits AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM ranged_limits
+
+                UNION ALL
+
+                SELECT
+                    'tushare.index_weight',
+                    NULL::BIGINT,
+                    NULL::BIGINT,
+                    count(*)::BIGINT,
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM tushare.index_weight
             ),
             commits AS (
                 SELECT dataset_id, max(committed_at) AS last_committed_at
@@ -738,10 +1050,18 @@ class DuckDBStore:
             SELECT
                 coverage.dataset_id,
                 CASE
-                    WHEN coverage.dataset_id = 'tushare.stock_basic'
+                    WHEN coverage.dataset_id IN (
+                        'tushare.stock_basic',
+                        'tushare.namechange',
+                        'tushare.index_weight'
+                    )
                         AND coverage.row_count = 0 THEN 'EMPTY'
-                    WHEN coverage.dataset_id NOT IN (
-                        'tushare.stock_basic', 'tushare.trade_cal'
+                    WHEN coverage.dataset_id IN (
+                        'tushare.daily',
+                        'tushare.adj_factor',
+                        'tushare.daily_basic',
+                        'tushare.suspend_d',
+                        'tushare.stk_limit'
                     ) AND calendar_health.available_days < calendar_health.expected_days
                         THEN 'CALENDAR_INCOMPLETE'
                     WHEN coalesce(coverage.available_days, 0)
@@ -769,10 +1089,14 @@ class DuckDBStore:
             LEFT JOIN commits USING (dataset_id)
             ORDER BY CASE coverage.dataset_id
                 WHEN 'tushare.stock_basic' THEN 1
-                WHEN 'tushare.trade_cal' THEN 2
-                WHEN 'tushare.daily' THEN 3
-                WHEN 'tushare.adj_factor' THEN 4
-                WHEN 'tushare.daily_basic' THEN 5
+                WHEN 'tushare.namechange' THEN 2
+                WHEN 'tushare.trade_cal' THEN 3
+                WHEN 'tushare.daily' THEN 4
+                WHEN 'tushare.adj_factor' THEN 5
+                WHEN 'tushare.daily_basic' THEN 6
+                WHEN 'tushare.suspend_d' THEN 7
+                WHEN 'tushare.stk_limit' THEN 8
+                WHEN 'tushare.index_weight' THEN 9
             END
             """,
             params=[start, end],

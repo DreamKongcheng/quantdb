@@ -40,6 +40,12 @@ db.sync("tushare.daily", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.adj_factor", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.daily_basic", start="2026-07-01", end="2026-07-14")
 
+# 历史名称、停复牌、涨跌停价格和月度指数权重。
+db.sync("tushare.namechange", refresh=True)
+db.sync("tushare.suspend_d", start="2026-07-01", end="2026-07-14")
+db.sync("tushare.stk_limit", start="2026-07-01", end="2026-07-14")
+db.sync("tushare.index_weight", start="2026-06-01", end="2026-06-30")
+
 prices = db.sql("""
     SELECT *
     FROM tushare.daily
@@ -64,7 +70,16 @@ panel = db.panel(
     as_of="2024-12-31",
 )
 
-# 刷新股票基础信息，并补齐 2010 年以来缺失的日历和三个日频数据集。
+# 查询历史名称/ST 状态、当时有效的沪深 300 成分和每日交易约束。
+status = db.sql("SELECT * FROM market.security_status_asof(DATE '2024-06-30')")
+members = db.sql(
+    "SELECT * FROM market.index_members_asof('000300.SH', DATE '2024-06-30')"
+)
+constraints = db.sql(
+    "SELECT * FROM market.stock_trade_constraints_asof(DATE '2024-06-28')"
+)
+
+# 刷新证券主数据，并补齐 2010 年以来缺失的日频和月度数据集。
 reports = db.update()
 
 # 动态检查指定区间的数据覆盖，不写入额外的健康状态表。
@@ -88,6 +103,10 @@ uv run quantdb sync tushare.daily \
   --end 2026-07-14
 uv run quantdb sync tushare.adj_factor --start 2026-07-01 --end 2026-07-14
 uv run quantdb sync tushare.daily_basic --start 2026-07-01 --end 2026-07-14
+uv run quantdb sync tushare.namechange --refresh
+uv run quantdb sync tushare.suspend_d --start 2026-07-01 --end 2026-07-14
+uv run quantdb sync tushare.stk_limit --start 2026-07-01 --end 2026-07-14
+uv run quantdb sync tushare.index_weight --start 2026-06-01 --end 2026-06-30
 uv run quantdb update
 uv run quantdb health
 uv run quantdb status
@@ -96,10 +115,11 @@ uv run quantdb sql "SELECT count(*) FROM tushare.daily"
 
 `quantdb update` 默认检查 `2010-01-01` 到今天，按以下顺序执行：
 
-1. 原子刷新 `tushare.stock_basic`。
+1. 原子刷新 `tushare.stock_basic` 和 `tushare.namechange`。
 2. 补齐缺失的 `tushare.trade_cal` 自然年分区。
-3. 依次补齐 `tushare.daily`、`tushare.adj_factor`、`tushare.daily_basic` 交易日分区。
-4. 输出本次日期范围内的数据集健康状态。
+3. 依次补齐行情、复权因子、每日指标、停复牌和涨跌停价格的交易日分区。
+4. 补齐沪深 300、中证 500、中证全指的完整月份权重分区。
+5. 输出本次日期范围内的数据集健康状态。
 
 可以通过 `--start`、`--end` 调整检查范围；日频接口尚未发布当天数据时，当前分区
 会失败且不会提交，之后重新运行即可。
@@ -138,6 +158,10 @@ tushare.trade_cal
 tushare.daily
 tushare.adj_factor
 tushare.daily_basic
+tushare.namechange
+tushare.suspend_d
+tushare.stk_limit
+tushare.index_weight
 market.daily_bar
 market.latest_adj_factor
 market.daily_bar_hfq
@@ -145,15 +169,23 @@ market.daily_bar_qfq_latest
 market.daily_bar_qfq_asof(as_of_date)
 market.daily_metrics
 market.daily_panel
+market.security_name_history
+market.security_status_asof(as_of_date)
+market.index_members_asof(index_code, as_of_date)
+market.trade_constraints_daily
+market.stock_trade_constraints_daily
+market.stock_trade_constraints_asof(as_of_date)
 ```
 
 `tushare.*` 只做必要的数据库类型转换，不做复权、填充、去极值等业务清洗。
 网络请求全部完成并通过完整性校验后，系统才会开启 DuckDB 事务。事务内原子替换
 对应分区，并同时更新 `meta.partitions`。
 
-`adj_factor` 和 `daily_basic` 按 180 次/分钟主动限速，为 Tushare 的 200 次/分钟
-额度保留余量。若仍因共享 token 或残留时间窗口触发限频，客户端会等待 61 秒后
-自动重试，不会提交当前未完成分区。
+`adj_factor`、`daily_basic` 及新增的四个接口按 180 次/分钟主动限速，为 Tushare
+的 200 次/分钟额度保留余量。若仍因共享 token 或残留时间窗口触发限频，客户端会
+等待 61 秒后自动重试，不会提交当前未完成分区。Tushare 的 `namechange` 当前存在
+少量完全相同的重复行；同步层只对该接口去除整行完全重复记录，再按证券和生效日期
+验证唯一性。
 
 `market.*` 通过视图实时读取原始表，不重复存储行情。后复权价格为
 `raw_price * adj_factor`；最新前复权价格为
@@ -172,6 +204,22 @@ FROM market.daily_bar_qfq_asof(DATE '2024-12-31');
 `market.daily_panel` 以 `market.daily_bar` 为主表左连接这些指标，其中 `close` 始终
 来自日线行情；缺失的每日指标保留为 `NULL`。面板不连接当前 `stock_basic`，避免将
 当前上市状态、行业等信息无意带入历史截面。
+
+`market.security_status_asof()` 根据名称的生效起止日期返回历史名称、ST/退市整理
+标记和上市状态；名称历史缺失时 `is_st`、`is_delisting` 保留为 `NULL`，不会用当前
+名称静默回填。`market.index_members_asof()` 选择指定日期不晚于查询日的最新月度
+权重快照。目前同步 `000300.SH`、`000905.SH`、`000985.CSI`；尚未结束的月份不会
+创建空分区。
+
+`market.trade_constraints_daily` 保留 Tushare 返回的全部证券，包括股票、ETF 等，
+并完整保留只有停复牌记录、没有日线的证券。股票回测应使用
+`market.stock_trade_constraints_daily` 或单日 macro
+`market.stock_trade_constraints_asof()`；它们根据每条记录当日的上市和退市区间过滤，
+同时附带历史名称、ST 和退市整理标记，不读取当前名称、行业或当前上市状态。
+
+交易约束层提供 `open_at_up_limit`、`locked_up_limit`、`can_buy_at_open` 等辅助字段。
+`can_buy_at_open` 和 `can_sell_at_open` 只表达开盘成交口径；全天是否封板应使用
+`locked_up_limit`、`locked_down_limit`，精确的开板和排队成交仍需要分钟或盘口数据。
 
 ## 数据健康
 
