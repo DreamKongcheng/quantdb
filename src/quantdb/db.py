@@ -101,6 +101,40 @@ class QuantDB:
             as_of=as_of_date,
         )
 
+    def universe(
+        self,
+        as_of: str | date | datetime,
+        *,
+        index_code: str | None = None,
+        exclude_st: bool = False,
+        exclude_delisting: bool = False,
+    ) -> duckdb.DuckDBPyRelation:
+        as_of_date = parse_date(as_of)
+        normalized_index_code: str | None = None
+        if index_code is not None:
+            if not isinstance(index_code, str):
+                raise ValueError("index_code 必须是非空字符串")
+            normalized_index_code = index_code.strip()
+            if not normalized_index_code:
+                raise ValueError("index_code 必须是非空字符串")
+        return self.store.universe(
+            as_of=as_of_date,
+            index_code=normalized_index_code,
+            exclude_st=exclude_st,
+            exclude_delisting=exclude_delisting,
+        )
+
+    def tradeability(
+        self,
+        as_of: str | date | datetime,
+        *,
+        symbols: str | Sequence[str] | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        return self.store.tradeability(
+            as_of=parse_date(as_of),
+            symbols=self._normalize_symbols(symbols),
+        )
+
     def _normalize_market_query(
         self,
         symbols: str | Sequence[str] | None,
@@ -120,7 +154,20 @@ class QuantDB:
         if as_of is not None and adjust != "qfq":
             raise ValueError("as_of 只适用于 adjust='qfq'")
 
-        normalized_symbols: tuple[str, ...] | None
+        normalized_symbols = self._normalize_symbols(symbols)
+
+        start_date = parse_date(start) if start is not None else None
+        end_date = parse_date(end) if end is not None else None
+        as_of_date = parse_date(as_of) if as_of is not None else None
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+
+        return normalized_symbols, start_date, end_date, adjust, as_of_date
+
+    @staticmethod
+    def _normalize_symbols(
+        symbols: str | Sequence[str] | None,
+    ) -> tuple[str, ...] | None:
         if symbols is None:
             normalized_symbols = None
         elif isinstance(symbols, str):
@@ -131,14 +178,7 @@ class QuantDB:
             isinstance(symbol, str) and symbol for symbol in normalized_symbols
         ):
             raise ValueError("symbols 必须是非空字符串或非空字符串序列")
-
-        start_date = parse_date(start) if start is not None else None
-        end_date = parse_date(end) if end is not None else None
-        as_of_date = parse_date(as_of) if as_of is not None else None
-        if start_date is not None and end_date is not None and start_date > end_date:
-            raise ValueError("start 不能晚于 end")
-
-        return normalized_symbols, start_date, end_date, adjust, as_of_date
+        return normalized_symbols
 
     def update(
         self,

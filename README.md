@@ -19,6 +19,20 @@ TUSHARE_TOKEN=你的_token
 QUANTDB_PATH=~/Data/investing/quantdb/quantdb.duckdb
 ```
 
+## 推荐入口
+
+日常研究只需要记住四个返回 DuckDB relation 的方法：
+
+| 用途 | 方法 |
+| --- | --- |
+| 查询原始或复权行情 | `db.bars()` |
+| 查询行情与每日指标 | `db.panel()` |
+| 构建某日点时点股票池 | `db.universe()` |
+| 查询某日停牌和涨跌停约束 | `db.tradeability()` |
+
+`update()`、`health()` 和 `status()` 用于数据维护；`sync()`、`sql()` 以及直接访问
+`tushare.*`、`market.*` 适合数据集管理和高级查询。
+
 ## Python API
 
 ```python
@@ -70,13 +84,18 @@ panel = db.panel(
     as_of="2024-12-31",
 )
 
-# 查询历史名称/ST 状态、当时有效的沪深 300 成分和每日交易约束。
-status = db.sql("SELECT * FROM market.security_status_asof(DATE '2024-06-30')")
-members = db.sql(
-    "SELECT * FROM market.index_members_asof('000300.SH', DATE '2024-06-30')"
+# 构建当时有效的沪深 300 股票池，并显式排除 ST 和退市整理股票。
+universe = db.universe(
+    "2024-06-28",
+    index_code="000300.SH",
+    exclude_st=True,
+    exclude_delisting=True,
 )
-constraints = db.sql(
-    "SELECT * FROM market.stock_trade_constraints_asof(DATE '2024-06-28')"
+
+# 查询当日全部上市股票，或指定股票的停牌和涨跌停约束。
+tradeability = db.tradeability(
+    "2024-06-28",
+    symbols=["000001.SZ", "600000.SH"],
 )
 
 # 刷新证券主数据，并补齐 2010 年以来缺失的日频和月度数据集。
@@ -92,6 +111,11 @@ health = db.health(start="2010-01-01", end="2024-12-31")
 适合需要固定回测口径的场景。`panel()` 使用相同的查询和复权参数，并在行情列后
 追加 `daily_metrics`；其中 `close` 始终来自行情数据。以上查询返回 DuckDB relation；
 研究项目安装 Polars 后可以在最终结果上调用 `.pl()`。
+
+`universe()` 默认只按查询日的上市和退市区间筛选，不擅自排除 ST。启用
+`exclude_st` 或 `exclude_delisting` 后，名称历史缺失的证券也会被保守排除；传入
+`index_code` 时结果追加指数快照日期和权重。`tradeability()` 始终使用点时点上市
+股票层，因此不会混入 ETF，并保留只有停复牌记录、没有日线的股票。
 
 ## CLI
 
@@ -145,9 +169,9 @@ uv run quantdb sync tushare.daily \
 数据库路径的优先级为 `--db`、系统环境变量 `QUANTDB_PATH`、`.env` 中的
 `QUANTDB_PATH`、当前目录的 `quantdb.duckdb`。路径中的 `~` 会自动展开。
 
-## 数据库结构
+## 数据库结构（高级）
 
-数据库当前包含原始数据、同步元数据和标准行情三个 schema：
+以下表和视图是四个推荐方法的底层构件，也可以通过 `sql()` 直接组合：
 
 ```text
 meta.partitions

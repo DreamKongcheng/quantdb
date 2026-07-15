@@ -291,6 +291,34 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
             ORDER BY trade_date
             """
         ).fetchall() == [("000003.SZ",)]
+        assert db.universe("2024-02-01").project(
+            "ts_code, historical_name, is_st, index_code, weight"
+        ).fetchall() == [
+            ("000001.SZ", "平安银行", False, None, None),
+            ("000002.SZ", None, None, None, None),
+        ]
+        assert db.universe(
+            "2024-02-15",
+            index_code="000300.SH",
+        ).project("ts_code, index_code, snapshot_date, weight").fetchall() == [
+            ("000001.SZ", "000300.SH", date(2024, 1, 31), 1.0),
+            ("000002.SZ", "000300.SH", date(2024, 1, 31), 2.0),
+        ]
+        assert db.universe(
+            "2024-02-01",
+            exclude_st=True,
+            exclude_delisting=True,
+        ).project("ts_code").fetchall() == [("000001.SZ",)]
+        assert db.tradeability("2024-02-01").project(
+            "ts_code, is_suspended, can_buy_at_open"
+        ).fetchall() == [
+            ("000001.SZ", False, False),
+            ("000002.SZ", True, False),
+        ]
+        assert db.tradeability("2024-02-01", symbols="000002.SZ").project(
+            "ts_code, is_suspended"
+        ).fetchall() == [("000002.SZ", True)]
+        assert db.tradeability("2024-02-01", symbols=[]).fetchall() == []
 
 
 def test_health_reports_missing_dates_and_security_rows(tmp_path):
@@ -392,6 +420,10 @@ def test_bars_validates_query_parameters(tmp_path):
             db.bars(start="2024-01-02", end="2024-01-01")
         with pytest.raises(ValueError, match="symbols"):
             db.bars([""])
+        with pytest.raises(ValueError, match="index_code"):
+            db.universe("2024-01-01", index_code="")
+        with pytest.raises(ValueError, match="symbols"):
+            db.tradeability("2024-01-01", symbols=[""])
 
 
 def test_market_schema_initialization_is_idempotent(tmp_path):
@@ -418,6 +450,8 @@ def test_read_only_database_supports_research_queries_and_rejects_updates(tmp_pa
 
     with QuantDB(path, read_only=True) as db:
         assert db.panel("000001.SZ", adjust="hfq").count("*").fetchone() == (2,)
+        assert db.universe("2024-01-01").fetchall() == []
+        assert db.tradeability("2024-01-01").fetchall() == []
         with pytest.raises(ReadOnlyDatabaseError, match="只读"):
             db.init()
         with pytest.raises(ReadOnlyDatabaseError, match="只读"):

@@ -738,6 +738,87 @@ class DuckDBStore:
             include_metrics=True,
         )
 
+    def universe(
+        self,
+        *,
+        as_of: date,
+        index_code: str | None,
+        exclude_st: bool,
+        exclude_delisting: bool,
+    ) -> duckdb.DuckDBPyRelation:
+        params: list[object] = [as_of]
+        if index_code is None:
+            membership_columns = """
+                NULL::VARCHAR AS index_code,
+                NULL::DATE AS snapshot_date,
+                NULL::DOUBLE AS weight
+            """
+            membership_join = ""
+        else:
+            membership_columns = """
+                membership.index_code,
+                membership.snapshot_date,
+                membership.weight
+            """
+            membership_join = """
+                JOIN market.index_members_asof(?::VARCHAR, ?::DATE) AS membership
+                    ON membership.con_code = status.ts_code
+            """
+            params.extend((index_code, as_of))
+
+        filters = ["status.is_listed"]
+        if exclude_st:
+            filters.append("status.is_st = false")
+        if exclude_delisting:
+            filters.append("status.is_delisting = false")
+
+        query = f"""
+            SELECT
+                status.ts_code,
+                status.symbol,
+                status.historical_name,
+                status.name_start_date,
+                status.name_end_date,
+                status.name_ann_date,
+                status.change_reason,
+                status.has_name_history,
+                status.is_st,
+                status.is_delisting,
+                status.list_date,
+                status.delist_date,
+                {membership_columns}
+            FROM market.security_status_asof(?::DATE) AS status
+            {membership_join}
+            WHERE {" AND ".join(filters)}
+            ORDER BY status.ts_code
+        """
+        return self.connection.sql(query, params=params)
+
+    def tradeability(
+        self,
+        *,
+        as_of: date,
+        symbols: Sequence[str] | None,
+    ) -> duckdb.DuckDBPyRelation:
+        params: list[object] = [as_of]
+        filters: list[str] = []
+        if symbols is not None:
+            if symbols:
+                placeholders = ", ".join("?" for _ in symbols)
+                filters.append(f"constraints.ts_code IN ({placeholders})")
+                params.extend(symbols)
+            else:
+                filters.append("false")
+
+        query = """
+            SELECT constraints.*
+            FROM market.stock_trade_constraints_asof(?::DATE) AS constraints
+        """
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY constraints.ts_code"
+        return self.connection.sql(query, params=params)
+
     def _market_data(
         self,
         *,
