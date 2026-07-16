@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -95,21 +96,44 @@ class SyncEngine:
         start: str | date | datetime | None = None,
         end: str | date | datetime | None = None,
         refresh: bool = False,
+        index_codes: str | Sequence[str] | None = None,
     ) -> SyncReport:
         spec = get_dataset(dataset_id)
 
+        if index_codes is not None and spec.partition_strategy != "index_month":
+            raise ValueError("index_codes 只适用于 tushare.index_weight")
+
         if spec.partition_strategy == "trading_day":
             partitions = self._prepare_trading_day(spec, start, end)
+        elif spec.partition_strategy == "calendar_day":
+            partitions = self._prepare_calendar_day(spec, start, end)
         elif spec.partition_strategy == "calendar_year":
             partitions = calendar_year_partitions(start, end)
         elif spec.partition_strategy == "full":
             partitions = [full_partition()]
         elif spec.partition_strategy == "index_month":
-            partitions = index_month_partitions(start, end)
+            partitions = index_month_partitions(start, end, index_codes=index_codes)
         else:  # pragma: no cover - 注册表新增策略时的防御分支
             raise ValueError(f"数据集 {spec.id} 的分区策略尚未实现")
 
         return self._sync_partitions(spec, partitions, refresh=refresh)
+
+    def _prepare_calendar_day(
+        self,
+        spec: DatasetSpec,
+        start: str | date | datetime | None,
+        end: str | date | datetime | None,
+    ) -> list[Partition]:
+        if start is None:
+            raise ValueError(f"同步 {spec.id} 必须提供 start")
+        start_date = parse_date(start)
+        end_date = parse_date(end) if end is not None else start_date
+        if start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+        return [
+            daily_partition(start_date + timedelta(days=offset))
+            for offset in range((end_date - start_date).days + 1)
+        ]
 
     def _prepare_trading_day(
         self,
@@ -224,7 +248,7 @@ def validate_frame(spec: DatasetSpec, partition: Partition, frame: pd.DataFrame)
         if duplicates.any():
             raise DatasetValidationError(f"{spec.id} 返回重复主键，共 {int(duplicates.sum())} 行")
 
-    if spec.partition_strategy == "trading_day":
+    if spec.partition_strategy in {"calendar_day", "trading_day"}:
         expected = str(partition.request_params["trade_date"])
         actual = set(frame["trade_date"].astype("string").str.strip().dropna())
         if actual != {expected}:

@@ -24,6 +24,7 @@ def test_sync_help_exposes_progress_switch():
     assert result.exit_code == 0
     assert "--progress" in result.output
     assert "--no-progress" in result.output
+    assert "--index-code" in result.output
 
 
 def test_sync_keyboard_interrupt_exits_with_code_130(monkeypatch):
@@ -109,7 +110,15 @@ def test_update_runs_all_steps_and_prints_health(monkeypatch):
 
     assert result.exit_code == 0
     assert calls == [
-        ("update", {"start": "2024-01-01", "end": "2024-01-03", "progress": None}),
+        (
+            "update",
+            {
+                "start": "2024-01-01",
+                "end": "2024-01-03",
+                "index_codes": None,
+                "progress": None,
+            },
+        ),
         ("health", {"start": "2024-01-01", "end": "2024-01-03"}),
     ]
     assert "tushare.stock_basic: 成功 1 个分区" in result.output
@@ -137,3 +146,51 @@ def test_health_command_forwards_date_range(monkeypatch):
 
     assert result.exit_code == 0
     assert "HEALTH TABLE" in result.output
+
+
+def test_update_indices_forwards_repeated_index_codes(monkeypatch):
+    calls = []
+
+    class UpdatingIndicesQuantDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def update_indices(self, **kwargs):
+            calls.append(kwargs)
+            return (
+                SyncReport(
+                    "tushare.index_weight",
+                    (PartitionResult("tushare.index_weight", "full", "SUCCESS", 1),),
+                ),
+            )
+
+    monkeypatch.setattr("quantdb.cli.QuantDB", lambda _path: UpdatingIndicesQuantDB())
+
+    result = runner.invoke(
+        app,
+        [
+            "update-indices",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-31",
+            "--index-code",
+            "000300.SH",
+            "--index-code",
+            "000852.SH",
+            "--no-progress",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "start": "2024-01-01",
+            "end": "2024-01-31",
+            "index_codes": ["000300.SH", "000852.SH"],
+            "progress": None,
+        }
+    ]

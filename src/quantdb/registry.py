@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
 from quantdb.errors import DatasetNotFoundError
 
-PartitionStrategy = Literal["full", "calendar_year", "trading_day", "index_month"]
+PartitionStrategy = Literal[
+    "full",
+    "calendar_year",
+    "calendar_day",
+    "trading_day",
+    "index_month",
+]
 
 INDEX_WEIGHT_CODES = ("000300.SH", "000905.SH", "000985.CSI")
+INDEX_BASIC_MARKETS = ("MSCI", "CSI", "SSE", "SZSE", "CICC", "SW", "OTH")
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,7 @@ class DatasetSpec:
     dependencies: tuple[str, ...] = ()
     request_variants: tuple[Mapping[str, str], ...] = field(default_factory=lambda: ({},))
     requests_per_minute: int | None = None
+    page_size: int | None = None
     deduplicate_exact_rows: bool = False
 
     @property
@@ -243,6 +251,83 @@ STK_LIMIT = DatasetSpec(
     partition_strategy="trading_day",
     dependencies=(TRADE_CAL.id,),
     requests_per_minute=180,
+    page_size=5_800,
+)
+
+INDEX_BASIC = DatasetSpec(
+    id="tushare.index_basic",
+    endpoint="index_basic",
+    table="tushare.index_basic",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("name", "VARCHAR"),
+        column("fullname", "VARCHAR"),
+        column("market", "VARCHAR"),
+        column("publisher", "VARCHAR"),
+        column("index_type", "VARCHAR"),
+        column("category", "VARCHAR"),
+        column("base_date", "DATE", "%Y%m%d"),
+        column("base_point", "DOUBLE"),
+        column("list_date", "DATE", "%Y%m%d"),
+        column("weight_rule", "VARCHAR"),
+        column("desc", "VARCHAR"),
+        column("exp_date", "DATE", "%Y%m%d"),
+    ),
+    primary_key=("ts_code",),
+    partition_strategy="full",
+    request_variants=tuple({"market": market} for market in INDEX_BASIC_MARKETS),
+    requests_per_minute=180,
+    page_size=5_000,
+    deduplicate_exact_rows=True,
+)
+
+INDEX_DAILY = DatasetSpec(
+    id="tushare.index_daily",
+    endpoint="index_daily",
+    table="tushare.index_daily",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("open", "DOUBLE"),
+        column("high", "DOUBLE"),
+        column("low", "DOUBLE"),
+        column("close", "DOUBLE"),
+        column("pre_close", "DOUBLE"),
+        column("change", "DOUBLE"),
+        column("pct_chg", "DOUBLE"),
+        column("vol", "DOUBLE"),
+        column("amount", "DOUBLE"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    # 文档将 ts_code 标为必填，但当前服务端支持按自然日分页返回全部指数。
+    partition_strategy="calendar_day",
+    allow_empty=True,
+    requests_per_minute=180,
+)
+
+INDEX_DAILYBASIC = DatasetSpec(
+    id="tushare.index_dailybasic",
+    endpoint="index_dailybasic",
+    table="tushare.index_dailybasic",
+    columns=(
+        column("ts_code", "VARCHAR"),
+        column("trade_date", "DATE", "%Y%m%d"),
+        column("total_mv", "DOUBLE"),
+        column("float_mv", "DOUBLE"),
+        column("total_share", "DOUBLE"),
+        column("float_share", "DOUBLE"),
+        column("free_share", "DOUBLE"),
+        column("turnover_rate", "DOUBLE"),
+        column("turnover_rate_f", "DOUBLE"),
+        column("pe", "DOUBLE"),
+        column("pe_ttm", "DOUBLE"),
+        column("pb", "DOUBLE"),
+    ),
+    primary_key=("ts_code", "trade_date"),
+    partition_strategy="trading_day",
+    dependencies=(TRADE_CAL.id,),
+    requests_per_minute=180,
+    page_size=3_000,
 )
 
 INDEX_WEIGHT = DatasetSpec(
@@ -259,6 +344,51 @@ INDEX_WEIGHT = DatasetSpec(
     partition_strategy="index_month",
     allow_empty=True,
     requests_per_minute=180,
+    page_size=1_000,
+)
+
+INDEX_CLASSIFY = DatasetSpec(
+    id="tushare.index_classify",
+    endpoint="index_classify",
+    table="tushare.index_classify",
+    columns=(
+        column("index_code", "VARCHAR"),
+        column("industry_name", "VARCHAR"),
+        column("level", "VARCHAR"),
+        column("industry_code", "VARCHAR"),
+        column("is_pub", "VARCHAR"),
+        column("parent_code", "VARCHAR"),
+        column("src", "VARCHAR"),
+    ),
+    primary_key=("src", "index_code"),
+    partition_strategy="full",
+    request_variants=({"src": "SW2021"},),
+    requests_per_minute=180,
+)
+
+INDEX_MEMBER_ALL = DatasetSpec(
+    id="tushare.index_member_all",
+    endpoint="index_member_all",
+    table="tushare.index_member_all",
+    columns=(
+        column("l1_code", "VARCHAR"),
+        column("l1_name", "VARCHAR"),
+        column("l2_code", "VARCHAR"),
+        column("l2_name", "VARCHAR"),
+        column("l3_code", "VARCHAR"),
+        column("l3_name", "VARCHAR"),
+        column("ts_code", "VARCHAR"),
+        column("name", "VARCHAR"),
+        column("in_date", "DATE", "%Y%m%d"),
+        column("out_date", "DATE", "%Y%m%d"),
+        column("is_new", "VARCHAR"),
+    ),
+    primary_key=("ts_code", "l3_code", "in_date"),
+    partition_strategy="full",
+    requests_per_minute=180,
+    # 官方文档单页上限为 2,000 行；当前服务端实测可返回 3,000 行。
+    page_size=2_000,
+    deduplicate_exact_rows=True,
 )
 
 DATASETS: dict[str, DatasetSpec] = {
@@ -272,7 +402,12 @@ DATASETS: dict[str, DatasetSpec] = {
         DAILY_BASIC,
         SUSPEND_D,
         STK_LIMIT,
+        INDEX_BASIC,
+        INDEX_DAILY,
+        INDEX_DAILYBASIC,
         INDEX_WEIGHT,
+        INDEX_CLASSIFY,
+        INDEX_MEMBER_ALL,
     )
 }
 
@@ -349,7 +484,7 @@ def index_month_partitions(
     start: str | date | datetime | None,
     end: str | date | datetime | None,
     *,
-    index_codes: tuple[str, ...] = INDEX_WEIGHT_CODES,
+    index_codes: str | Sequence[str] | None = None,
 ) -> list[Partition]:
     if start is None:
         raise ValueError("同步 tushare.index_weight 必须提供 start")
@@ -357,6 +492,8 @@ def index_month_partitions(
     end_date = parse_date(end) if end is not None else start_date
     if start_date > end_date:
         raise ValueError("start 不能晚于 end")
+
+    normalized_codes = normalize_index_codes(index_codes)
 
     month_start = date(start_date.year, start_date.month, 1)
     partitions: list[Partition] = []
@@ -369,7 +506,7 @@ def index_month_partitions(
         # 月度权重只提交完整月份，避免月中空结果被永久视为已同步。
         if month_end > end_date:
             break
-        for index_code in index_codes:
+        for index_code in normalized_codes:
             partitions.append(
                 Partition(
                     id=f"index_code={index_code}/month={month_start:%Y-%m}",
@@ -388,6 +525,15 @@ def index_month_partitions(
         else:
             month_start = date(month_start.year, month_start.month + 1, 1)
     return partitions
+
+
+def normalize_index_codes(index_codes: str | Sequence[str] | None) -> tuple[str, ...]:
+    if index_codes is None:
+        return INDEX_WEIGHT_CODES
+    raw_codes = (index_codes,) if isinstance(index_codes, str) else tuple(index_codes)
+    if not raw_codes or any(not isinstance(code, str) or not code.strip() for code in raw_codes):
+        raise ValueError("index_codes 必须是非空字符串或非空字符串序列")
+    return tuple(dict.fromkeys(code.strip() for code in raw_codes))
 
 
 def quote_identifier(value: str) -> str:

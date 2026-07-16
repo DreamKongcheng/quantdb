@@ -33,6 +33,10 @@ def sync(
     db: DatabaseOption = None,
     start: Annotated[str | None, typer.Option(help="开始日期 YYYY-MM-DD")] = None,
     end: Annotated[str | None, typer.Option(help="结束日期 YYYY-MM-DD")] = None,
+    index_codes: Annotated[
+        list[str] | None,
+        typer.Option("--index-code", help="index_weight 要同步的指数代码，可重复传入"),
+    ] = None,
     refresh: Annotated[bool, typer.Option(help="重新获取并替换已有分区")] = False,
     show_progress: Annotated[
         bool,
@@ -47,6 +51,7 @@ def sync(
                 start=start,
                 end=end,
                 refresh=refresh,
+                index_codes=index_codes,
                 progress=progress,
             )
     except (KeyboardInterrupt, SyncInterruptedError) as exc:
@@ -65,7 +70,11 @@ def update(
     ] = "2010-01-01",
     end: Annotated[
         str | None,
-        typer.Option(help="结束日期 YYYY-MM-DD，默认今天"),
+        typer.Option(help="结束日期 YYYY-MM-DD，默认昨天"),
+    ] = None,
+    index_codes: Annotated[
+        list[str] | None,
+        typer.Option("--index-code", help="index_weight 要同步的指数代码，可重复传入"),
     ] = None,
     show_progress: Annotated[
         bool,
@@ -75,7 +84,12 @@ def update(
     try:
         with QuantDB(db) as database:
             progress = TqdmSyncProgress() if show_progress else None
-            reports = database.update(start=start, end=end, progress=progress)
+            reports = database.update(
+                start=start,
+                end=end,
+                index_codes=index_codes,
+                progress=progress,
+            )
             for report in reports:
                 typer.echo(
                     f"{report.dataset_id}: 成功 {report.completed} 个分区，"
@@ -87,6 +101,46 @@ def update(
         _exit_with_error("更新已中断，已提交分区保留，当前分区将在下次重试", exc, code=130)
     except (QuantDBError, ValueError) as exc:
         _exit_with_error("更新失败", exc)
+
+
+@app.command("update-indices")
+def update_indices(
+    db: DatabaseOption = None,
+    start: Annotated[
+        str,
+        typer.Option(help="检查和补齐指数数据的开始日期 YYYY-MM-DD"),
+    ] = "2010-01-01",
+    end: Annotated[
+        str | None,
+        typer.Option(help="结束日期 YYYY-MM-DD，默认昨天"),
+    ] = None,
+    index_codes: Annotated[
+        list[str] | None,
+        typer.Option("--index-code", help="要同步成分权重的指数代码，可重复传入"),
+    ] = None,
+    show_progress: Annotated[
+        bool,
+        typer.Option("--progress/--no-progress", help="显示同步进度、速度和预计剩余时间"),
+    ] = True,
+) -> None:
+    try:
+        with QuantDB(db) as database:
+            progress = TqdmSyncProgress() if show_progress else None
+            reports = database.update_indices(
+                start=start,
+                end=end,
+                index_codes=index_codes,
+                progress=progress,
+            )
+            for report in reports:
+                typer.echo(
+                    f"{report.dataset_id}: 成功 {report.completed} 个分区，"
+                    f"跳过 {report.skipped} 个分区"
+                )
+    except (KeyboardInterrupt, SyncInterruptedError) as exc:
+        _exit_with_error("指数更新已中断，已提交分区保留，当前分区将在下次重试", exc, code=130)
+    except (QuantDBError, ValueError) as exc:
+        _exit_with_error("指数更新失败", exc)
 
 
 @app.command()
@@ -110,7 +164,7 @@ def health(
     ] = "2010-01-01",
     end: Annotated[
         str | None,
-        typer.Option(help="结束日期 YYYY-MM-DD，默认今天"),
+        typer.Option(help="结束日期 YYYY-MM-DD，默认昨天"),
     ] = None,
 ) -> None:
     try:

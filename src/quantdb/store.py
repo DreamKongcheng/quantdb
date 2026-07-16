@@ -97,6 +97,7 @@ class DuckDBStore:
         )
         self._initialize_market_schema()
         self._initialize_market_metrics_schema()
+        self._initialize_indices_schema()
         self._initialize_market_reference_schema()
 
     def _migrate_suspend_d_event_table(self) -> None:
@@ -331,6 +332,8 @@ class DuckDBStore:
         )
 
     def _initialize_market_reference_schema(self) -> None:
+        self.connection.execute("DROP MACRO IF EXISTS market.index_members_asof")
+        self.connection.execute("DROP MACRO IF EXISTS market.stock_industry_asof")
         self.connection.execute(
             """
             CREATE OR REPLACE VIEW market.security_name_history AS
@@ -381,29 +384,6 @@ class DuckDBStore:
                 LEFT JOIN matching_name
                     ON matching_name.ts_code = security.ts_code
                    AND matching_name.match_rank = 1
-            )
-            """
-        )
-        self.connection.execute(
-            """
-            CREATE OR REPLACE MACRO market.index_members_asof(
-                requested_index_code, as_of_date
-            ) AS TABLE (
-                WITH snapshot AS (
-                    SELECT max(trade_date) AS trade_date
-                    FROM tushare.index_weight
-                    WHERE index_code = requested_index_code
-                      AND trade_date <= as_of_date
-                )
-                SELECT
-                    weights.index_code,
-                    weights.con_code,
-                    weights.trade_date AS snapshot_date,
-                    weights.weight
-                FROM tushare.index_weight AS weights
-                CROSS JOIN snapshot
-                WHERE weights.index_code = requested_index_code
-                  AND weights.trade_date = snapshot.trade_date
             )
             """
         )
@@ -584,6 +564,196 @@ class DuckDBStore:
             SELECT 7, '支持同一证券日多条停复牌事件', current_timestamp
             WHERE NOT EXISTS (
                 SELECT 1 FROM meta.schema_version WHERE version = 7
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 8, '增加申万 2021 行业分类与点时点行业归属', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 8
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 9, '增加指数基础信息、日线行情与 indices 专题层', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 9
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO meta.schema_version
+            SELECT 10, '增加大盘指数每日指标与指数面板', current_timestamp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM meta.schema_version WHERE version = 10
+            )
+            """
+        )
+
+    def _initialize_indices_schema(self) -> None:
+        self.connection.execute("CREATE SCHEMA IF NOT EXISTS indices")
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW indices.basic AS
+            SELECT
+                ts_code,
+                name,
+                fullname,
+                market,
+                publisher,
+                index_type,
+                category,
+                base_date,
+                base_point,
+                list_date,
+                weight_rule,
+                "desc" AS description,
+                exp_date
+            FROM tushare.index_basic
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW indices.daily_bar AS
+            SELECT
+                ts_code,
+                trade_date,
+                open,
+                high,
+                low,
+                close,
+                pre_close,
+                change,
+                pct_chg,
+                vol,
+                amount
+            FROM tushare.index_daily
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW indices.daily_metrics AS
+            SELECT
+                ts_code,
+                trade_date,
+                total_mv,
+                float_mv,
+                total_share,
+                float_share,
+                free_share,
+                turnover_rate,
+                turnover_rate_f,
+                pe,
+                pe_ttm,
+                pb
+            FROM tushare.index_dailybasic
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW indices.daily_panel AS
+            SELECT
+                bar.ts_code,
+                bar.trade_date,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.pre_close,
+                bar.change,
+                bar.pct_chg,
+                bar.vol,
+                bar.amount,
+                metrics.total_mv,
+                metrics.float_mv,
+                metrics.total_share,
+                metrics.float_share,
+                metrics.free_share,
+                metrics.turnover_rate,
+                metrics.turnover_rate_f,
+                metrics.pe,
+                metrics.pe_ttm,
+                metrics.pb
+            FROM indices.daily_bar AS bar
+            LEFT JOIN indices.daily_metrics AS metrics
+                USING (ts_code, trade_date)
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE VIEW indices.industry_classification AS
+            SELECT
+                index_code,
+                industry_name,
+                level,
+                industry_code,
+                is_pub,
+                parent_code,
+                src
+            FROM tushare.index_classify
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO indices.members_asof(
+                requested_index_code, as_of_date
+            ) AS TABLE (
+                WITH snapshot AS (
+                    SELECT max(trade_date) AS trade_date
+                    FROM tushare.index_weight
+                    WHERE index_code = requested_index_code
+                      AND trade_date <= as_of_date
+                )
+                SELECT
+                    weights.index_code,
+                    weights.con_code,
+                    weights.trade_date AS snapshot_date,
+                    weights.weight
+                FROM tushare.index_weight AS weights
+                CROSS JOIN snapshot
+                WHERE weights.index_code = requested_index_code
+                  AND weights.trade_date = snapshot.trade_date
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            CREATE OR REPLACE MACRO indices.stock_industry_asof(as_of_date) AS TABLE (
+                WITH matching_membership AS (
+                    SELECT
+                        membership.*,
+                        row_number() OVER (
+                            PARTITION BY membership.ts_code
+                            ORDER BY membership.in_date DESC,
+                                     membership.out_date DESC NULLS FIRST,
+                                     membership.l3_code
+                        ) AS membership_rank
+                    FROM tushare.index_member_all AS membership
+                    WHERE membership.in_date <= as_of_date
+                      AND (
+                          membership.out_date IS NULL
+                          OR membership.out_date >= as_of_date
+                      )
+                )
+                SELECT
+                    l1_code,
+                    l1_name,
+                    l2_code,
+                    l2_name,
+                    l3_code,
+                    l3_name,
+                    ts_code,
+                    name,
+                    in_date,
+                    out_date,
+                    is_new
+                FROM matching_membership
+                WHERE membership_rank = 1
             )
             """
         )
@@ -809,6 +979,65 @@ class DuckDBStore:
             include_metrics=True,
         )
 
+    def index_bars(
+        self,
+        *,
+        index_codes: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+    ) -> duckdb.DuckDBPyRelation:
+        return self._index_data(
+            index_codes=index_codes,
+            start=start,
+            end=end,
+            include_metrics=False,
+        )
+
+    def index_panel(
+        self,
+        *,
+        index_codes: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+    ) -> duckdb.DuckDBPyRelation:
+        return self._index_data(
+            index_codes=index_codes,
+            start=start,
+            end=end,
+            include_metrics=True,
+        )
+
+    def _index_data(
+        self,
+        *,
+        index_codes: Sequence[str] | None,
+        start: date | None,
+        end: date | None,
+        include_metrics: bool,
+    ) -> duckdb.DuckDBPyRelation:
+        params: list[object] = []
+        filters: list[str] = []
+        if index_codes is not None:
+            if index_codes:
+                placeholders = ", ".join("?" for _ in index_codes)
+                filters.append(f"bar.ts_code IN ({placeholders})")
+                params.extend(index_codes)
+            else:
+                filters.append("false")
+        if start is not None:
+            filters.append("bar.trade_date >= ?::DATE")
+            params.append(start)
+        if end is not None:
+            filters.append("bar.trade_date <= ?::DATE")
+            params.append(end)
+
+        source = "indices.daily_panel" if include_metrics else "indices.daily_bar"
+        query = f"SELECT bar.* FROM {source} AS bar"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY bar.trade_date, bar.ts_code"
+        return self.connection.sql(query, params=params)
+
     def universe(
         self,
         *,
@@ -832,7 +1061,7 @@ class DuckDBStore:
                 membership.weight
             """
             membership_join = """
-                JOIN market.index_members_asof(?::VARCHAR, ?::DATE) AS membership
+                JOIN indices.members_asof(?::VARCHAR, ?::DATE) AS membership
                     ON membership.con_code = status.ts_code
             """
             params.extend((index_code, as_of))
@@ -1006,6 +1235,16 @@ class DuckDBStore:
                 FROM tushare.daily_basic AS metrics, bounds
                 WHERE metrics.trade_date BETWEEN bounds.start_date AND bounds.end_date
             ),
+            ranged_index_daily AS (
+                SELECT bars.*
+                FROM tushare.index_daily AS bars, bounds
+                WHERE bars.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            ranged_index_metrics AS (
+                SELECT metrics.*
+                FROM tushare.index_dailybasic AS metrics, bounds
+                WHERE metrics.trade_date BETWEEN bounds.start_date AND bounds.end_date
+            ),
             ranged_suspension AS (
                 SELECT suspension.*
                 FROM tushare.suspend_d AS suspension, bounds
@@ -1020,6 +1259,13 @@ class DuckDBStore:
                 SELECT try_cast(partition_values ->> 'trade_date' AS DATE) AS trade_date
                 FROM meta.partitions, bounds
                 WHERE dataset_id = 'tushare.suspend_d'
+                  AND try_cast(partition_values ->> 'trade_date' AS DATE)
+                      BETWEEN bounds.start_date AND bounds.end_date
+            ),
+            index_daily_partition_dates AS (
+                SELECT try_cast(partition_values ->> 'trade_date' AS DATE) AS trade_date
+                FROM meta.partitions, bounds
+                WHERE dataset_id = 'tushare.index_daily'
                   AND try_cast(partition_values ->> 'trade_date' AS DATE)
                       BETWEEN bounds.start_date AND bounds.end_date
             ),
@@ -1051,6 +1297,42 @@ class DuckDBStore:
                     max(coalesce(end_date, start_date)),
                     NULL::BIGINT
                 FROM tushare.namechange
+
+                UNION ALL
+
+                SELECT
+                    'tushare.index_basic',
+                    NULL::BIGINT,
+                    NULL::BIGINT,
+                    count(*)::BIGINT,
+                    min(list_date),
+                    max(coalesce(exp_date, list_date)),
+                    NULL::BIGINT
+                FROM tushare.index_basic
+
+                UNION ALL
+
+                SELECT
+                    'tushare.index_classify',
+                    NULL::BIGINT,
+                    NULL::BIGINT,
+                    count(*)::BIGINT,
+                    NULL::DATE,
+                    NULL::DATE,
+                    NULL::BIGINT
+                FROM tushare.index_classify
+
+                UNION ALL
+
+                SELECT
+                    'tushare.index_member_all',
+                    NULL::BIGINT,
+                    NULL::BIGINT,
+                    count(*)::BIGINT,
+                    min(in_date),
+                    max(coalesce(out_date, in_date)),
+                    NULL::BIGINT
+                FROM tushare.index_member_all
 
                 UNION ALL
 
@@ -1144,6 +1426,44 @@ class DuckDBStore:
                 UNION ALL
 
                 SELECT
+                    'tushare.index_daily',
+                    (SELECT date_diff('day', start_date, end_date) + 1 FROM bounds),
+                    (
+                        SELECT count(*)
+                        FROM (
+                            SELECT DISTINCT trade_date FROM ranged_index_daily
+                            UNION
+                            SELECT DISTINCT trade_date FROM index_daily_partition_dates
+                        ) AS available
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM ranged_index_daily
+
+                UNION ALL
+
+                SELECT
+                    'tushare.index_dailybasic',
+                    (SELECT count(*) FROM open_dates),
+                    (
+                        SELECT count(*)
+                        FROM open_dates AS expected
+                        WHERE EXISTS (
+                            SELECT 1 FROM ranged_index_metrics AS actual
+                            WHERE actual.trade_date = expected.cal_date
+                        )
+                    ),
+                    count(*),
+                    min(trade_date),
+                    max(trade_date),
+                    NULL::BIGINT
+                FROM ranged_index_metrics
+
+                UNION ALL
+
+                SELECT
                     'tushare.suspend_d',
                     (SELECT count(*) FROM open_dates),
                     (
@@ -1205,6 +1525,9 @@ class DuckDBStore:
                     WHEN coverage.dataset_id IN (
                         'tushare.stock_basic',
                         'tushare.namechange',
+                        'tushare.index_basic',
+                        'tushare.index_classify',
+                        'tushare.index_member_all',
                         'tushare.index_weight'
                     )
                         AND coverage.row_count = 0 THEN 'EMPTY'
@@ -1212,6 +1535,7 @@ class DuckDBStore:
                         'tushare.daily',
                         'tushare.adj_factor',
                         'tushare.daily_basic',
+                        'tushare.index_dailybasic',
                         'tushare.suspend_d',
                         'tushare.stk_limit'
                     ) AND calendar_health.available_days < calendar_health.expected_days
@@ -1242,13 +1566,18 @@ class DuckDBStore:
             ORDER BY CASE coverage.dataset_id
                 WHEN 'tushare.stock_basic' THEN 1
                 WHEN 'tushare.namechange' THEN 2
-                WHEN 'tushare.trade_cal' THEN 3
-                WHEN 'tushare.daily' THEN 4
-                WHEN 'tushare.adj_factor' THEN 5
-                WHEN 'tushare.daily_basic' THEN 6
-                WHEN 'tushare.suspend_d' THEN 7
-                WHEN 'tushare.stk_limit' THEN 8
-                WHEN 'tushare.index_weight' THEN 9
+                WHEN 'tushare.index_basic' THEN 3
+                WHEN 'tushare.index_classify' THEN 4
+                WHEN 'tushare.index_member_all' THEN 5
+                WHEN 'tushare.trade_cal' THEN 6
+                WHEN 'tushare.daily' THEN 7
+                WHEN 'tushare.adj_factor' THEN 8
+                WHEN 'tushare.daily_basic' THEN 9
+                WHEN 'tushare.index_daily' THEN 10
+                WHEN 'tushare.index_dailybasic' THEN 11
+                WHEN 'tushare.suspend_d' THEN 12
+                WHEN 'tushare.stk_limit' THEN 13
+                WHEN 'tushare.index_weight' THEN 14
             END
             """,
             params=[start, end],

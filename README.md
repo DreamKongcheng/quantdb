@@ -21,17 +21,19 @@ QUANTDB_PATH=~/Data/investing/quantdb/quantdb.duckdb
 
 ## 推荐入口
 
-日常研究只需要记住四个返回 DuckDB relation 的方法：
+日常研究只需要记住六个返回 DuckDB relation 的方法：
 
 | 用途 | 方法 |
 | --- | --- |
 | 查询原始或复权行情 | `db.bars()` |
 | 查询行情与每日指标 | `db.panel()` |
+| 查询指数日线行情 | `db.index_bars()` |
+| 查询指数行情与每日指标 | `db.index_panel()` |
 | 构建某日点时点股票池 | `db.universe()` |
 | 查询某日停牌和涨跌停约束 | `db.tradeability()` |
 
 `update()`、`health()` 和 `status()` 用于数据维护；`sync()`、`sql()` 以及直接访问
-`tushare.*`、`market.*` 适合数据集管理和高级查询。
+`tushare.*`、`market.*`、`indices.*` 适合数据集管理和高级查询。
 
 ## Python API
 
@@ -54,11 +56,21 @@ db.sync("tushare.daily", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.adj_factor", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.daily_basic", start="2026-07-01", end="2026-07-14")
 
-# 历史名称、停复牌、涨跌停价格和月度指数权重。
+# 历史名称、申万 2021 行业分类、停复牌、涨跌停价格和月度指数权重。
 db.sync("tushare.namechange", refresh=True)
+db.sync("tushare.index_basic", refresh=True)
+db.sync("tushare.index_classify", refresh=True)
+db.sync("tushare.index_member_all", refresh=True)
+db.sync("tushare.index_daily", start="2026-07-01", end="2026-07-14")
+db.sync("tushare.index_dailybasic", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.suspend_d", start="2026-07-01", end="2026-07-14")
 db.sync("tushare.stk_limit", start="2026-07-01", end="2026-07-14")
-db.sync("tushare.index_weight", start="2026-06-01", end="2026-06-30")
+db.sync(
+    "tushare.index_weight",
+    start="2026-06-01",
+    end="2026-06-30",
+    index_codes=["000300.SH", "000905.SH", "000985.CSI"],
+)
 
 prices = db.sql("""
     SELECT *
@@ -84,6 +96,19 @@ panel = db.panel(
     as_of="2024-12-31",
 )
 
+# 指数行情独立使用 indices 语义层，不做股票复权或连接股票每日指标。
+index_bars = db.index_bars(
+    ["000300.SH", "000905.SH"],
+    start="2020-01-01",
+    end="2024-12-31",
+)
+
+index_panel = db.index_panel(
+    ["000300.SH", "000905.SH"],
+    start="2020-01-01",
+    end="2024-12-31",
+)
+
 # 构建当时有效的沪深 300 股票池，并显式排除 ST 和退市整理股票。
 universe = db.universe(
     "2024-06-28",
@@ -100,6 +125,12 @@ tradeability = db.tradeability(
 
 # 刷新证券主数据，并补齐 2010 年以来缺失的日频和月度数据集。
 reports = db.update()
+
+# 也可以只刷新指数基础信息、全量指数日线、申万分类和指定指数权重。
+index_reports = db.update_indices(
+    start="2020-01-01",
+    index_codes=["000300.SH", "000905.SH", "000852.SH"],
+)
 
 # 动态检查指定区间的数据覆盖，不写入额外的健康状态表。
 health = db.health(start="2010-01-01", end="2024-12-31")
@@ -128,20 +159,30 @@ uv run quantdb sync tushare.daily \
 uv run quantdb sync tushare.adj_factor --start 2026-07-01 --end 2026-07-14
 uv run quantdb sync tushare.daily_basic --start 2026-07-01 --end 2026-07-14
 uv run quantdb sync tushare.namechange --refresh
+uv run quantdb sync tushare.index_basic --refresh
+uv run quantdb sync tushare.index_classify --refresh
+uv run quantdb sync tushare.index_member_all --refresh
+uv run quantdb sync tushare.index_daily --start 2026-07-01 --end 2026-07-14
+uv run quantdb sync tushare.index_dailybasic --start 2026-07-01 --end 2026-07-14
 uv run quantdb sync tushare.suspend_d --start 2026-07-01 --end 2026-07-14
 uv run quantdb sync tushare.stk_limit --start 2026-07-01 --end 2026-07-14
-uv run quantdb sync tushare.index_weight --start 2026-06-01 --end 2026-06-30
+uv run quantdb sync tushare.index_weight \
+  --start 2026-06-01 --end 2026-06-30 \
+  --index-code 000300.SH --index-code 000905.SH
+uv run quantdb update-indices \
+  --start 2020-01-01 \
+  --index-code 000300.SH --index-code 000905.SH --index-code 000852.SH
 uv run quantdb update
 uv run quantdb health
 uv run quantdb status
 uv run quantdb sql "SELECT count(*) FROM tushare.daily"
 ```
 
-`quantdb update` 默认检查 `2010-01-01` 到今天，按以下顺序执行：
+`quantdb update` 默认检查 `2010-01-01` 到昨天，按以下顺序执行：
 
-1. 原子刷新 `tushare.stock_basic` 和 `tushare.namechange`。
+1. 原子刷新证券主数据、历史名称、指数基础信息和申万 2021 行业分类。
 2. 补齐缺失的 `tushare.trade_cal` 自然年分区。
-3. 依次补齐行情、复权因子、每日指标、停复牌和涨跌停价格的交易日分区。
+3. 补齐股票交易日日频数据、指数自然日日线和大盘指数交易日指标。
 4. 补齐沪深 300、中证 500、中证全指的完整月份权重分区。
 5. 输出本次日期范围内的数据集健康状态。
 
@@ -171,7 +212,7 @@ uv run quantdb sync tushare.daily \
 
 ## 数据库结构（高级）
 
-以下表和视图是四个推荐方法的底层构件，也可以通过 `sql()` 直接组合：
+以下表和视图是六个推荐方法的底层构件，也可以通过 `sql()` 直接组合：
 
 ```text
 meta.partitions
@@ -183,6 +224,11 @@ tushare.daily
 tushare.adj_factor
 tushare.daily_basic
 tushare.namechange
+tushare.index_basic
+tushare.index_daily
+tushare.index_dailybasic
+tushare.index_classify
+tushare.index_member_all
 tushare.suspend_d
 tushare.stk_limit
 tushare.index_weight
@@ -195,21 +241,34 @@ market.daily_metrics
 market.daily_panel
 market.security_name_history
 market.security_status_asof(as_of_date)
-market.index_members_asof(index_code, as_of_date)
 market.trade_constraints_daily
 market.stock_trade_constraints_daily
 market.stock_trade_constraints_asof(as_of_date)
+indices.basic
+indices.daily_bar
+indices.daily_metrics
+indices.daily_panel
+indices.industry_classification
+indices.members_asof(index_code, as_of_date)
+indices.stock_industry_asof(as_of_date)
 ```
 
 `tushare.*` 只做必要的数据库类型转换，不做复权、填充、去极值等业务清洗。
 网络请求全部完成并通过完整性校验后，系统才会开启 DuckDB 事务。事务内原子替换
 对应分区，并同时更新 `meta.partitions`。
 
-`adj_factor`、`daily_basic` 及新增的四个接口按 180 次/分钟主动限速，为 Tushare
-的 200 次/分钟额度保留余量。若仍因共享 token 或残留时间窗口触发限频，客户端会
+注册表中配置了限速的接口按 180 次/分钟主动限速，为 Tushare 的 200 次/分钟额度
+保留余量。若仍因共享 token 或残留时间窗口触发限频，客户端会
 等待 61 秒后自动重试，不会提交当前未完成分区。Tushare 的 `namechange` 当前存在
 少量完全相同的重复行；同步层只对该接口去除整行完全重复记录，再按证券和生效日期
 验证唯一性。
+
+`tushare.index_basic` 按 `MSCI`、`CSI`、`SSE`、`SZSE`、`CICC`、`SW`、`OTH`
+七个市场分别获取后原子合并。`tushare.index_daily` 按自然日同步，因为 A 股休市日
+仍可能存在境外指数行情；当前 Tushare 服务端支持仅传 `trade_date` 分页获取全部指数，
+虽然官方文档仍将 `ts_code` 标为必填。同步层会校验每页字段和目标日期；如果上游
+收紧该行为，则需要改为按指数代码同步。`tushare.index_dailybasic` 按 A 股交易日
+保存大盘指数的市值、股本、换手率、PE 和 PB；申万行业行情需要 `sw_daily`，本期未接入。
 
 `market.*` 通过视图实时读取原始表，不重复存储行情。后复权价格为
 `raw_price * adj_factor`；最新前复权价格为
@@ -229,11 +288,24 @@ FROM market.daily_bar_qfq_asof(DATE '2024-12-31');
 来自日线行情；缺失的每日指标保留为 `NULL`。面板不连接当前 `stock_basic`，避免将
 当前上市状态、行业等信息无意带入历史截面。
 
+`indices.*` 是指数专题语义层。`indices.basic` 提供指数元数据，
+`indices.daily_bar` 提供统一 OHLC 日线，`indices.daily_metrics` 提供大盘指数每日指标，
+`indices.daily_panel` 以行情为主表左连接指标；`tushare.index_classify` 固定保存
+申万 2021 的 L1/L2/L3 行业字典，
+`tushare.index_member_all` 保存股票行业归属及进出日期。使用
+`indices.stock_industry_asof()` 查询指定日期的唯一三级行业归属，不会读取当前
+`stock_basic.industry`。
+
 `market.security_status_asof()` 根据名称的生效起止日期返回历史名称、ST/退市整理
 标记和上市状态；名称历史缺失时 `is_st`、`is_delisting` 保留为 `NULL`，不会用当前
-名称静默回填。`market.index_members_asof()` 选择指定日期不晚于查询日的最新月度
-权重快照。目前同步 `000300.SH`、`000905.SH`、`000985.CSI`；尚未结束的月份不会
-创建空分区。
+名称静默回填。`indices.members_asof()` 选择指定日期不晚于查询日的最新月度权重
+快照。权重默认同步 `000300.SH`、`000905.SH`、`000985.CSI`，可通过 Python 的
+`index_codes` 或 CLI 的重复 `--index-code` 覆盖；尚未结束的月份不会创建空分区。
+
+`update()` 是完整更新入口，会更新当前注册的全部股票与指数数据集；
+`update_indices()` 和 `quantdb update-indices` 只用于单独维护指数专题。
+`update()`、`update_indices()` 和 `health()` 默认截止昨天，避免盘中行情或上游尚未发布
+的数据被持久化为空分区或半成品分区。需要包含今天时必须显式传入 `end`。
 
 `market.trade_constraints_daily` 保留 Tushare 返回的全部证券，包括股票、ETF 等，
 并完整保留只有停复牌记录、没有日线的证券。股票回测应使用
@@ -262,3 +334,7 @@ FROM market.daily_bar_qfq_asof(DATE '2024-12-31');
 
 `meta.partitions` 仍负责记录原子同步状态；健康检查读取原始表的实际数据，因此也能
 发现数据库被外部工具手动修改后造成的覆盖缺口。
+
+## 设计与复盘
+
+- [Tushare 分页静默截断复盘](docs/postmortems/2026-07-16-tushare-pagination-truncation.md)

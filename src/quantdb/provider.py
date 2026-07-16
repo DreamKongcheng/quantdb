@@ -47,16 +47,20 @@ class TushareClient:
         fields: tuple[str, ...],
         params: dict[str, str | int],
         requests_per_minute: int | None = None,
+        page_size: int | None = None,
     ) -> pd.DataFrame:
         pages: list[pd.DataFrame] = []
         offset = 0
         previous_first_row_hash: int | None = None
+        effective_page_size = self.page_size if page_size is None else page_size
+        if effective_page_size <= 0:
+            raise ValueError("page_size 必须大于 0")
 
         for _page_number in range(1_000):
             page = self._query_page(
                 endpoint,
                 fields=fields,
-                params={**params, "limit": self.page_size, "offset": offset},
+                params={**params, "limit": effective_page_size, "offset": offset},
                 requests_per_minute=requests_per_minute,
             )
             if not isinstance(page, pd.DataFrame):
@@ -77,9 +81,6 @@ class TushareClient:
                 raise FetchError(f"Tushare 接口 {endpoint} 分页未推进，拒绝提交不完整数据")
             previous_first_row_hash = first_row_hash
             pages.append(page)
-
-            if len(page) < self.page_size:
-                break
             offset += len(page)
         else:
             raise FetchError(f"Tushare 接口 {endpoint} 超过最大分页数量")
@@ -149,6 +150,7 @@ class TushareProvider:
                     fields=spec.source_fields,
                     params=params,
                     requests_per_minute=spec.requests_per_minute,
+                    page_size=spec.page_size,
                 )
             )
         if not frames:

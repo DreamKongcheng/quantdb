@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -43,6 +43,7 @@ class QuantDB:
         start: str | date | datetime | None = None,
         end: str | date | datetime | None = None,
         refresh: bool = False,
+        index_codes: str | Sequence[str] | None = None,
         progress: SyncProgress | None = None,
     ) -> SyncReport:
         self._require_writable("同步数据")
@@ -56,6 +57,7 @@ class QuantDB:
             start=start,
             end=end,
             refresh=refresh,
+            index_codes=index_codes,
         )
 
     def sql(self, query: str) -> duckdb.DuckDBPyRelation:
@@ -99,6 +101,42 @@ class QuantDB:
             end=end_date,
             adjust=adjust,
             as_of=as_of_date,
+        )
+
+    def index_bars(
+        self,
+        index_codes: str | Sequence[str] | None = None,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        normalized_codes = self._normalize_symbols(index_codes)
+        start_date = parse_date(start) if start is not None else None
+        end_date = parse_date(end) if end is not None else None
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+        return self.store.index_bars(
+            index_codes=normalized_codes,
+            start=start_date,
+            end=end_date,
+        )
+
+    def index_panel(
+        self,
+        index_codes: str | Sequence[str] | None = None,
+        *,
+        start: str | date | datetime | None = None,
+        end: str | date | datetime | None = None,
+    ) -> duckdb.DuckDBPyRelation:
+        normalized_codes = self._normalize_symbols(index_codes)
+        start_date = parse_date(start) if start is not None else None
+        end_date = parse_date(end) if end is not None else None
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+        return self.store.index_panel(
+            index_codes=normalized_codes,
+            start=start_date,
+            end=end_date,
         )
 
     def universe(
@@ -185,17 +223,21 @@ class QuantDB:
         *,
         start: str | date | datetime = "2010-01-01",
         end: str | date | datetime | None = None,
+        index_codes: str | Sequence[str] | None = None,
         progress: SyncProgress | None = None,
     ) -> tuple[SyncReport, ...]:
         self._require_writable("更新数据")
         start_date = parse_date(start)
-        end_date = parse_date(end) if end is not None else date.today()
+        end_date = parse_date(end) if end is not None else _default_end_date()
         if start_date > end_date:
             raise ValueError("start 不能晚于 end")
 
         reports = [
             self.sync("tushare.stock_basic", refresh=True, progress=progress),
             self.sync("tushare.namechange", refresh=True, progress=progress),
+            self.sync("tushare.index_basic", refresh=True, progress=progress),
+            self.sync("tushare.index_classify", refresh=True, progress=progress),
+            self.sync("tushare.index_member_all", refresh=True, progress=progress),
             self.sync(
                 "tushare.trade_cal",
                 start=start_date,
@@ -207,6 +249,8 @@ class QuantDB:
             "tushare.daily",
             "tushare.adj_factor",
             "tushare.daily_basic",
+            "tushare.index_daily",
+            "tushare.index_dailybasic",
             "tushare.suspend_d",
             "tushare.stk_limit",
         ):
@@ -223,9 +267,50 @@ class QuantDB:
                 "tushare.index_weight",
                 start=start_date,
                 end=end_date,
+                index_codes=index_codes,
                 progress=progress,
             )
         )
+        return tuple(reports)
+
+    def update_indices(
+        self,
+        *,
+        start: str | date | datetime = "2010-01-01",
+        end: str | date | datetime | None = None,
+        index_codes: str | Sequence[str] | None = None,
+        progress: SyncProgress | None = None,
+    ) -> tuple[SyncReport, ...]:
+        self._require_writable("更新指数数据")
+        start_date = parse_date(start)
+        end_date = parse_date(end) if end is not None else _default_end_date()
+        if start_date > end_date:
+            raise ValueError("start 不能晚于 end")
+
+        reports = [
+            self.sync("tushare.index_basic", refresh=True, progress=progress),
+            self.sync("tushare.index_classify", refresh=True, progress=progress),
+            self.sync("tushare.index_member_all", refresh=True, progress=progress),
+            self.sync(
+                "tushare.index_daily",
+                start=start_date,
+                end=end_date,
+                progress=progress,
+            ),
+            self.sync(
+                "tushare.index_dailybasic",
+                start=start_date,
+                end=end_date,
+                progress=progress,
+            ),
+            self.sync(
+                "tushare.index_weight",
+                start=start_date,
+                end=end_date,
+                index_codes=index_codes,
+                progress=progress,
+            ),
+        ]
         return tuple(reports)
 
     def health(
@@ -235,7 +320,7 @@ class QuantDB:
         end: str | date | datetime | None = None,
     ) -> duckdb.DuckDBPyRelation:
         start_date = parse_date(start)
-        end_date = parse_date(end) if end is not None else date.today()
+        end_date = parse_date(end) if end is not None else _default_end_date()
         if start_date > end_date:
             raise ValueError("start 不能晚于 end")
         return self.store.health(start_date, end_date)
@@ -256,3 +341,8 @@ class QuantDB:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+def _default_end_date() -> date:
+    """返回默认维护截止日，避免固化尚未完整发布的当日数据。"""
+    return date.today() - timedelta(days=1)

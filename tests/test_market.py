@@ -198,6 +198,21 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
         )
         db.sql(
             """
+            INSERT INTO tushare.index_member_all VALUES
+                (
+                    '801780.SI', '银行', '801781.SI', '大型银行',
+                    '801781.SI', '大型银行', '000001.SZ', '平安银行',
+                    DATE '2020-01-01', DATE '2023-12-31', 'N'
+                ),
+                (
+                    '801780.SI', '银行', '801782.SI', '股份制银行',
+                    '801782.SI', '股份制银行', '000001.SZ', '平安银行',
+                    DATE '2024-01-01', NULL, 'Y'
+                )
+            """
+        )
+        db.sql(
+            """
             INSERT INTO tushare.daily VALUES
                 (
                     '000001.SZ', DATE '2024-02-01',
@@ -234,13 +249,34 @@ def test_point_in_time_status_index_members_and_trade_constraints(tmp_path):
         assert db.sql(
             """
             SELECT con_code, snapshot_date, weight
-            FROM market.index_members_asof('000300.SH', DATE '2024-02-15')
+            FROM indices.members_asof('000300.SH', DATE '2024-02-15')
             ORDER BY con_code
             """
         ).fetchall() == [
             ("000001.SZ", date(2024, 1, 31), 1.0),
             ("000002.SZ", date(2024, 1, 31), 2.0),
         ]
+        assert db.sql(
+            """
+            SELECT ts_code, l1_name, l2_name, l3_name, in_date, out_date
+            FROM indices.stock_industry_asof(DATE '2023-12-31')
+            """
+        ).fetchall() == [
+            (
+                "000001.SZ",
+                "银行",
+                "大型银行",
+                "大型银行",
+                date(2020, 1, 1),
+                date(2023, 12, 31),
+            )
+        ]
+        assert db.sql(
+            """
+            SELECT ts_code, l2_name, in_date, out_date
+            FROM indices.stock_industry_asof(DATE '2024-02-01')
+            """
+        ).fetchall() == [("000001.SZ", "股份制银行", date(2024, 1, 1), None)]
         assert db.sql(
             """
             SELECT
@@ -349,10 +385,15 @@ def test_health_reports_missing_dates_and_security_rows(tmp_path):
         assert health.fetchall() == [
             ("tushare.stock_basic", "EMPTY", None, None, 0, None, 0),
             ("tushare.namechange", "EMPTY", None, None, 0, None, 0),
+            ("tushare.index_basic", "EMPTY", None, None, 0, None, 0),
+            ("tushare.index_classify", "EMPTY", None, None, 0, None, 0),
+            ("tushare.index_member_all", "EMPTY", None, None, 0, None, 0),
             ("tushare.trade_cal", "HEALTHY", 2, 2, 0, None, 2),
             ("tushare.daily", "HEALTHY", 2, 2, 0, None, 3),
             ("tushare.adj_factor", "INCOMPLETE", 2, 2, 0, 1, 2),
             ("tushare.daily_basic", "HEALTHY", 2, 2, 0, 1, 2),
+            ("tushare.index_daily", "INCOMPLETE", 2, 0, 2, None, 0),
+            ("tushare.index_dailybasic", "INCOMPLETE", 2, 0, 2, None, 0),
             ("tushare.suspend_d", "INCOMPLETE", 2, 0, 2, None, 0),
             ("tushare.stk_limit", "INCOMPLETE", 2, 0, 2, None, 0),
             ("tushare.index_weight", "EMPTY", None, None, 0, None, 0),
@@ -413,6 +454,69 @@ def test_panel_combines_adjusted_bars_and_daily_metrics(tmp_path):
         ]
 
 
+def test_indices_schema_and_index_bars_expose_normalized_index_data(tmp_path):
+    with QuantDB(tmp_path / "quantdb.duckdb") as db:
+        db.sql(
+            """
+            INSERT INTO tushare.index_basic (
+                ts_code, name, fullname, market, publisher, base_date,
+                base_point, list_date, "desc"
+            ) VALUES (
+                '000300.SH', '沪深300', '沪深300指数', 'SSE', '中证指数有限公司',
+                DATE '2004-12-31', 1000.0, DATE '2005-04-08', '代表性规模指数'
+            )
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.index_daily VALUES
+                (
+                    '000300.SH', DATE '2024-01-02',
+                    3400.0, 3510.0, 3390.0, 3500.0, 3400.0,
+                    100.0, 2.94, 100000.0, 200000.0
+                ),
+                (
+                    '000905.SH', DATE '2024-01-02',
+                    5400.0, 5510.0, 5390.0, 5500.0, 5400.0,
+                    100.0, 1.85, 120000.0, 220000.0
+                )
+            """
+        )
+        db.sql(
+            """
+            INSERT INTO tushare.index_dailybasic (
+                ts_code, trade_date, total_mv, float_mv,
+                turnover_rate, turnover_rate_f, pe, pe_ttm, pb
+            ) VALUES (
+                '000300.SH', DATE '2024-01-02', 50000000000000.0, 40000000000000.0,
+                0.8, 1.1, 12.5, 12.8, 1.4
+            )
+            """
+        )
+
+        assert db.sql("SELECT ts_code, name, description FROM indices.basic").fetchall() == [
+            ("000300.SH", "沪深300", "代表性规模指数")
+        ]
+        assert db.index_bars("000300.SH", start="2024-01-02", end="2024-01-02").project(
+            "ts_code, trade_date, close"
+        ).fetchall() == [("000300.SH", date(2024, 1, 2), 3500.0)]
+        assert db.index_bars([]).fetchall() == []
+        assert db.index_panel(["000300.SH", "000905.SH"]).project(
+            "ts_code, close, total_mv, turnover_rate, pe, pb"
+        ).fetchall() == [
+            ("000300.SH", 3500.0, 50_000_000_000_000.0, 0.8, 12.5, 1.4),
+            ("000905.SH", 5500.0, None, None, None, None),
+        ]
+        assert db.sql(
+            """
+            SELECT count(*)
+            FROM duckdb_functions()
+            WHERE schema_name = 'market'
+              AND function_name IN ('index_members_asof', 'stock_industry_asof')
+            """
+        ).fetchone() == (0,)
+
+
 def test_bars_validates_query_parameters(tmp_path):
     with QuantDB(tmp_path / "quantdb.duckdb") as db:
         with pytest.raises(ValueError, match="adjust"):
@@ -443,6 +547,9 @@ def test_market_schema_initialization_is_idempotent(tmp_path):
             (5,),
             (6,),
             (7,),
+            (8,),
+            (9,),
+            (10,),
         ]
         assert db.bars("000001.SZ", adjust="qfq").count("*").fetchone() == (2,)
 
